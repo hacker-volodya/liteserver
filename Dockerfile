@@ -1,20 +1,16 @@
-FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+FROM rust:1.77.2-buster AS builder
 WORKDIR /app
-
-FROM chef AS planner
+RUN apt update && apt install -y libclang-dev clang
 COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM chef AS builder 
-RUN apt update && apt install -y libclang-dev
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-COPY . .
-RUN cargo build --release
+RUN --mount=type=cache,target=/var/cache/buildkit \
+    CARGO_HOME=/var/cache/buildkit/cargo \
+    CARGO_TARGET_DIR=/var/cache/buildkit/target \
+    cargo build --release --locked && \
+    cp /var/cache/buildkit/target/release/ton-node /
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
-COPY --from=builder /app/target/release/ton-node /usr/local/bin
+COPY --from=builder /ton-node /usr/local/bin
 COPY config /config
 EXPOSE 3000
 ENTRYPOINT ["/usr/local/bin/ton-node"]
