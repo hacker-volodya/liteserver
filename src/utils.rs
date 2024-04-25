@@ -37,6 +37,7 @@ impl<
             if let Some(value) = value_opt {
                 let should_continue = p(K::construct_from_cell(prefix.into_cell()?)?, value)?;
                 if !should_continue {
+                    // if hashmap iteration was interrupted, return Some(()). otherwise, None will be returned on complete
                     return Ok(TraverseNextStep::End(()));
                 }
             }
@@ -45,7 +46,7 @@ impl<
             } else {
                 TraverseNextStep::VisitZeroOne
             })
-        })?.is_some();
+        })?.is_none();
         Ok(is_complete)
     }
 }
