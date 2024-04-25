@@ -10,13 +10,13 @@ use ton_liteapi::{
     tl::{
         common::{BlockIdExt, Int256, ZeroStateIdExt},
         request::{
-            GetAllShardsInfo, GetBlockHeader, ListBlockTransactions, Request, WrappedRequest
+            GetAccountState, GetAllShardsInfo, GetBlockHeader, ListBlockTransactions, Request, WrappedRequest
         },
-        response::{AllShardsInfo, BlockHeader, BlockTransactions, MasterchainInfo, Response, TransactionId},
+        response::{AccountState, AllShardsInfo, BlockHeader, BlockTransactions, MasterchainInfo, Response, TransactionId},
     },
     types::LiteError,
 };
-use ton_types::{BagOfCells, Cell, UInt256, UsageTree};
+use ton_types::{serialize_toc, AccountId, BagOfCells, Cell, UInt256, UsageTree};
 use tower::{make::Shared, Service, ServiceBuilder};
 use x25519_dalek::StaticSecret;
 
@@ -203,15 +203,21 @@ impl LiteServer {
         })
     }
 
-    // pub async fn get_account_state(&self, req: &GetAccountState) -> Result<AccountState> {
-    //     let state = self.load_state(&req.id).await?;
-    //     let account = state
-    //         .state()
-    //         .read_accounts()?
-    //         .account(&AccountId::from_raw(req.account.id.0.to_vec(), 256))?
-    //         .ok_or(anyhow!("no such account"))?;
-    //     Ok(AccountState { id: req.id, shardblk: (), shard_proof: (), proof: (), state: () })
-    // }
+    pub async fn get_account_state(&self, req: &GetAccountState) -> Result<AccountState> {
+        let block = self.load_block(&req.id).await?.ok_or(anyhow!("no such block in db"))?;
+        let state_stuff = self.load_state(&req.id).await?;
+        let usage_tree_p2 = UsageTree::with_root(state_stuff.root_cell().clone());
+        let state = ShardStateUnsplit::construct_from_cell(usage_tree_p2.root_cell())?;
+        let account = state
+            .read_accounts()?
+            .account(&AccountId::from_raw(req.account.id.0.to_vec(), 256))?
+            .ok_or(anyhow!("no such account"))?;
+        let proof1 = Self::make_block_proof(block, true, false, false)?;
+        let proof2 = MerkleProof::create_by_usage_tree(state_stuff.root_cell(), usage_tree_p2)?;
+        let mut proof = Vec::new();
+        BagOfCells::with_roots(&[proof1.serialize()?, proof2.serialize()?]).write_to(&mut proof, false)?;
+        Ok(AccountState { id: req.id.clone(), shardblk: req.id.clone(), shard_proof: Vec::new(), proof, state: serialize_toc(&account.account_cell())? })
+    }
 
     async fn call_impl(&self, req: WrappedRequest) -> Result<Response> {
         tracing::info!("called {req:?}");
@@ -227,6 +233,9 @@ impl LiteServer {
             )),
             Request::ListBlockTransactions(req) => Ok(Response::BlockTransactions(
                 self.list_block_transactions(req).await?,
+            )),
+            Request::GetAccountState(req) => Ok(Response::AccountState(
+                self.get_account_state(&req).await?,
             )),
             _ => Err(anyhow!("unimplemented")),
         }
