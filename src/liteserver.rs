@@ -2,7 +2,7 @@ use std::{sync::Arc, task::Poll};
 
 use anyhow::{anyhow, Result};
 use futures_util::future::BoxFuture;
-use ton_block::{Block, Deserializable, GetRepresentationHash, HashmapAugType, InRefValue, MerkleProof, Serializable, ShardIdent, ShardStateUnsplit, Transaction};
+use ton_block::{AccountIdPrefixFull, Block, Deserializable, GetRepresentationHash, HashmapAugType, InRefValue, MerkleProof, MsgAddrStd, Serializable, ShardIdent, ShardStateUnsplit, Transaction, TraverseNextStep};
 use ton_indexer::{utils::ShardStateStuff, Engine, GlobalConfig};
 use ton_liteapi::{
     layers::{UnwrapMessagesLayer, WrapErrorLayer},
@@ -10,9 +10,9 @@ use ton_liteapi::{
     tl::{
         common::{BlockIdExt, Int256, ZeroStateIdExt},
         request::{
-            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, ListBlockTransactions, Request, WrappedRequest
+            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetConfigAll, GetTransactions, ListBlockTransactions, Request, WrappedRequest
         },
-        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, MasterchainInfo, Response, TransactionId},
+        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, Response, TransactionId, TransactionList},
     },
     types::LiteError,
 };
@@ -83,6 +83,10 @@ impl LiteServer {
             root_hash: UInt256::from_slice(&block_id.root_hash.0),
             file_hash: UInt256::from_slice(&block_id.file_hash.0),
         };
+        self.load_block_by_tonlabs_id(&tonlabs_block_id).await
+    }
+
+    async fn load_block_by_tonlabs_id(&self, tonlabs_block_id: &ton_block::BlockIdExt) -> Result<Option<Cell>> {
         let block_handle_storage = self.engine.storage().block_handle_storage();
         let block_storage = self.engine.storage().block_storage();
         if let Some(handle) = block_handle_storage.load_handle(&tonlabs_block_id)? {
@@ -224,6 +228,74 @@ impl LiteServer {
         Ok(AccountState { id: req.id.clone(), shardblk: req.id, shard_proof: Vec::new(), proof, state: serialize_toc(&account.account_cell())? })
     }
 
+    async fn search_mc_block_by_lt(&self, ltime: u64) -> Result<Option<ton_block::BlockIdExt>> {
+        let last = self.engine.load_last_applied_mc_block_id()?;
+        let mc_state = self.engine.load_state(&last).await?;
+        let extra = mc_state.shard_state_extra()?;
+        let result = extra.prev_blocks.traverse(|_, _, aug, value_opt| {
+            if aug.max_end_lt < ltime {
+                return Ok(TraverseNextStep::Stop)
+            }
+            if let Some(block_id) = value_opt {
+                println!("found {block_id:?}");
+                return Ok(TraverseNextStep::End(block_id))
+            }
+            Ok(TraverseNextStep::VisitZeroOne)
+        })?;
+        Ok(result.map(|id| id.master_block_id().1))
+    }
+
+    async fn search_transactions(&self, workchain: i8, account: &UInt256, mut lt: u64, count: Option<usize>) -> Result<(Vec<ton_block::BlockIdExt>, Vec<Transaction>)> {
+        let prefix = AccountIdPrefixFull::prefix(&ton_block::MsgAddressInt::AddrStd(MsgAddrStd::with_address(None, workchain, AccountId::from_raw(account.as_slice().to_vec(), 256))))?;
+        let mut transactions = Vec::new();
+        let mut block_ids = Vec::new();
+        while let Some(mc_block) = self.search_mc_block_by_lt(lt).await? {
+            let block_id = if workchain != -1 {
+                // get an actual shard block which contains requested account
+                let mc_state = self.engine.load_state(&mc_block).await?;
+                let shard = mc_state.shard_state_extra()?.shards().find_shard_by_prefix(&prefix)?.ok_or(anyhow!("no such shard"))?;
+                shard.block_id().clone()
+            } else {
+                // if account is in masterchain, simply return masterchain block
+                mc_block
+            };
+            if let Some(block_cell) = self.load_block_by_tonlabs_id(&block_id).await? {
+                let block = Block::construct_from_cell(block_cell)?;
+                if let Some(account_block) = block.read_extra()?.read_account_blocks()?.get(account)? {
+                    block_ids.push(block_id);
+                    println!("we want lt {lt}");
+                    let complete = account_block.transactions().iterate_ext(true, None, |_, InRefValue(tx)| {
+                        if tx.lt != lt {
+                            return Ok(true)
+                        }
+                        println!("we got lt {} (wanted {}), next lt we want is {}", tx.lt, lt, tx.prev_trans_lt);
+                        lt = tx.prev_trans_lt;
+                        transactions.push(tx);
+                        Ok(if let Some(count) = count { transactions.len() < count } else { true })
+                    })?;
+                    if !complete {
+                        break
+                    }
+                } else {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+        Ok((block_ids, transactions))
+    }
+
+    pub async fn get_transactions(&self, req: GetTransactions) -> Result<TransactionList> {
+        let (blocks, transactions) = self.search_transactions(req.account.workchain as i8, &UInt256::from_slice(&req.account.id.0), req.lt as u64, Some(req.count as usize)).await?;
+        let mut boc = Vec::new();
+        BagOfCells::with_roots(transactions.iter().map(|tx| tx.serialize()).collect::<Result<Vec<_>>>()?.as_slice()).write_to(&mut boc, false)?;
+        Ok(TransactionList {
+            ids: blocks.iter().map(|block| BlockIdExt { workchain: block.shard_id.workchain_id(), shard: block.shard_id.shard_prefix_with_tag(), seqno: block.seq_no, root_hash: Int256(*block.root_hash.as_array()), file_hash: Int256(*block.file_hash.as_array()) }).collect(),
+            transactions: boc,
+        })
+    }
+
     async fn call_impl(&self, req: WrappedRequest) -> Result<Response> {
         tracing::info!("called {req:?}");
         match req.request {
@@ -244,6 +316,9 @@ impl LiteServer {
             )),
             Request::GetBlock(req) => Ok(Response::BlockData(
                 self.get_block(req).await?,
+            )),
+            Request::GetTransactions(req) => Ok(Response::TransactionList(
+                self.get_transactions(req).await?,
             )),
             _ => Err(anyhow!("unimplemented")),
         }
