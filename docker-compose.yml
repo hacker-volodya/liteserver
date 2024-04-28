@@ -9,6 +9,7 @@ services:
     volumes:
       - data:/data
     restart: always
+    mem_limit: 5G
   explorer:
     build:
       context: explorer
