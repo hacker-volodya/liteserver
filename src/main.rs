@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use argh::FromArgs;
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
 use ton_indexer::{Engine, GlobalConfig, NodeConfig, Subscriber};
 
@@ -31,7 +31,7 @@ pub struct App {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let logger = tracing_subscriber::fmt().with_env_filter(
+    let logger = tracing_subscriber::fmt().with_span_events(FmtSpan::CLOSE).with_env_filter(
         EnvFilter::builder()
             .with_default_directive(tracing::Level::INFO.into())
             .from_env_lossy(),
