@@ -179,7 +179,7 @@ impl LiteServer {
             ids.push(TransactionId {
                 mode: (),
                 account: Some(Int256(tx.account_addr.to_owned().get_next_bytes(32)?.try_into().unwrap())),
-                lt: Some(tx.lt as i64),
+                lt: Some(tx.lt),
                 hash: Some(Int256(*tx.hash()?.as_array()))
             });
             let should_continue = ids.len() < req.count as usize;
@@ -287,7 +287,7 @@ impl LiteServer {
     }
 
     pub async fn get_transactions(&self, req: GetTransactions) -> Result<TransactionList> {
-        let (blocks, transactions) = self.search_transactions(req.account.workchain as i8, &UInt256::from_slice(&req.account.id.0), req.lt as u64, Some(req.count as usize)).await?;
+        let (blocks, transactions) = self.search_transactions(req.account.workchain as i8, &UInt256::from_slice(&req.account.id.0), req.lt, Some(req.count as usize)).await?;
         let mut boc = Vec::new();
         BagOfCells::with_roots(transactions.iter().map(|tx| tx.serialize()).collect::<Result<Vec<_>>>()?.as_slice()).write_to(&mut boc, false)?;
         Ok(TransactionList {
@@ -296,8 +296,8 @@ impl LiteServer {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "info")]
     async fn call_impl(&self, req: WrappedRequest) -> Result<Response> {
-        tracing::info!("called {req:?}");
         match req.request {
             Request::GetMasterchainInfo => Ok(Response::MasterchainInfo(
                 self.get_masterchain_info().await?,
@@ -331,10 +331,7 @@ impl Service<WrappedRequest> for LiteServer {
     type Future = BoxFuture<'static, Result<Response, LiteError>>;
 
     fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        match self.engine.is_synced() {
-            Ok(true) => Poll::Ready(Ok(())),
-            _ => Poll::Pending,
-        }
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, req: WrappedRequest) -> Self::Future {
