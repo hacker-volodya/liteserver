@@ -6,16 +6,20 @@ services:
     ports:
       - 30303:30303/udp
       - 3000:3000/tcp
+      - 172.17.0.1:3333:3333/tcp
     volumes:
       - data:/data
     restart: always
     mem_limit: 6G
   explorer:
-    build:
-      context: explorer
+    build: explorer
     restart: always
     ports:
       - 80:8080
-
+  block-metrics:
+    build: block-metrics
+    restart: always
+    ports:
+      - 3001:3000
 volumes:
   data:

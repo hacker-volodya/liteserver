@@ -1,4 +1,4 @@
-use std::{sync::Arc, task::Poll};
+use std::{sync::Arc, task::Poll, time::Duration};
 
 use anyhow::{anyhow, Result};
 use futures_util::future::BoxFuture;
@@ -10,7 +10,7 @@ use ton_liteapi::{
     tl::{
         common::{BlockIdExt, Int256, ZeroStateIdExt},
         request::{
-            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetConfigAll, GetTransactions, ListBlockTransactions, LookupBlock, Request, WrappedRequest
+            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetConfigAll, GetTransactions, ListBlockTransactions, LookupBlock, Request, WaitMasterchainSeqno, WrappedRequest
         },
         response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, Response, TransactionId, TransactionList},
     },
@@ -247,6 +247,9 @@ impl LiteServer {
 
     async fn search_mc_block_by_seqno(&self, seqno: u32) -> Result<Option<ton_block::BlockIdExt>> {
         let last = self.engine.load_last_applied_mc_block_id()?;
+        if seqno == last.seq_no {
+            return Ok(Some(last))
+        }
         let mc_state = self.engine.load_state(&last).await?;
         let extra = mc_state.shard_state_extra()?;
         let result = extra.prev_blocks.get(&seqno)?;
@@ -344,8 +347,27 @@ impl LiteServer {
         })  
     }
 
-    #[tracing::instrument(skip(self), level = "info")]
+    pub async fn wait_masterchain_seqno(&self, req: WaitMasterchainSeqno) -> Result<()> {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(req.timeout_ms as u64)) => Err(anyhow!("Timeout")),
+            r = async {
+                loop {
+                    // load_last_applied_mc_block_id uses sync mutex, may be very slow
+                    let last_seqno = self.engine.load_last_applied_mc_block_id()?.seq_no;
+                    if req.seqno <= last_seqno {
+                        return Ok(())
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } => r
+        }
+    }
+
+    #[tracing::instrument(skip(self), level = "info", err)]
     async fn call_impl(&self, req: WrappedRequest) -> Result<Response> {
+        if let Some(wait_req) = req.wait_masterchain_seqno {
+            self.wait_masterchain_seqno(wait_req).await?;
+        }
         match req.request {
             Request::GetMasterchainInfo => Ok(Response::MasterchainInfo(
                 self.get_masterchain_info().await?,

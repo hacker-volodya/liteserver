@@ -1,0 +1,14 @@
+{
+    "@type": "config.global",
+    "liteservers": [
+      {
+        "ip": -1408172031,
+        "port": 3333,
+        "id": {
+          "@type": "pub.ed25519",
+          "key": "aRoUUo+ykRg5ZJxInLTL7B9KoSbCRMDqKsKU61aKcDc="
+        }
+      }
+    ]
+  }
+  
