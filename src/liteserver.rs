@@ -10,7 +10,7 @@ use ton_liteapi::{
     tl::{
         common::{BlockIdExt, Int256, ZeroStateIdExt},
         request::{
-            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetConfigAll, GetTransactions, ListBlockTransactions, Request, WrappedRequest
+            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetConfigAll, GetTransactions, ListBlockTransactions, LookupBlock, Request, WrappedRequest
         },
         response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, Response, TransactionId, TransactionList},
     },
@@ -245,6 +245,14 @@ impl LiteServer {
         Ok(result.map(|id| id.master_block_id().1))
     }
 
+    async fn search_mc_block_by_seqno(&self, seqno: u32) -> Result<Option<ton_block::BlockIdExt>> {
+        let last = self.engine.load_last_applied_mc_block_id()?;
+        let mc_state = self.engine.load_state(&last).await?;
+        let extra = mc_state.shard_state_extra()?;
+        let result = extra.prev_blocks.get(&seqno)?;
+        Ok(result.map(|id| id.master_block_id().1))
+    }
+
     async fn search_transactions(&self, workchain: i8, account: &UInt256, mut lt: u64, count: Option<usize>) -> Result<(Vec<ton_block::BlockIdExt>, Vec<Transaction>)> {
         let prefix = AccountIdPrefixFull::prefix(&ton_block::MsgAddressInt::AddrStd(MsgAddrStd::with_address(None, workchain, AccountId::from_raw(account.as_slice().to_vec(), 256))))?;
         let mut transactions = Vec::new();
@@ -296,6 +304,46 @@ impl LiteServer {
         })
     }
 
+    pub async fn lookup_block(&self, req: LookupBlock) -> Result<BlockHeader> {
+        if req.id.workchain != -1 {
+            unimplemented!("search for basechain blocks")
+        }
+        let block_id = if let Some(utime) = req.utime {
+            unimplemented!("lookup by utime")
+        } else if let Some(lt) = req.lt {
+            self.search_mc_block_by_lt(lt).await?
+        } else if req.seqno.is_some() {
+            self.search_mc_block_by_seqno(req.id.seqno).await?
+        } else {
+            return Err(anyhow!("exactly one of utime, lt or seqno must be specified"))
+        }.ok_or(anyhow!("no such block in db"))?;
+        
+        let block_root = self.load_block_by_tonlabs_id(&block_id).await?.ok_or(anyhow!("no such block in db"))?;
+        let merkle_proof = Self::make_block_proof(
+            block_root,
+            req.with_state_update.is_some(),
+            req.with_value_flow.is_some(),
+            req.with_extra.is_some(),
+        )?;
+
+        Ok(BlockHeader {
+            id: BlockIdExt {
+                workchain: block_id.shard_id.workchain_id(),
+                shard: block_id.shard_id.shard_prefix_with_tag(),
+                seqno: block_id.seq_no,
+                root_hash: Int256(*block_id.root_hash.as_array()),
+                file_hash: Int256(*block_id.file_hash.as_array()),
+            },
+            mode: (),
+            header_proof: merkle_proof.write_to_bytes()?,
+            with_state_update: req.with_state_update,
+            with_value_flow: req.with_value_flow,
+            with_extra: req.with_extra,
+            with_shard_hashes: req.with_shard_hashes,
+            with_prev_blk_signatures: req.with_prev_blk_signatures,
+        })  
+    }
+
     #[tracing::instrument(skip(self), level = "info")]
     async fn call_impl(&self, req: WrappedRequest) -> Result<Response> {
         match req.request {
@@ -319,6 +367,9 @@ impl LiteServer {
             )),
             Request::GetTransactions(req) => Ok(Response::TransactionList(
                 self.get_transactions(req).await?,
+            )),
+            Request::LookupBlock(req) => Ok(Response::BlockHeader(
+                self.lookup_block(req).await?,
             )),
             _ => Err(anyhow!("unimplemented")),
         }

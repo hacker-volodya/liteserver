@@ -2571,7 +2571,7 @@ dependencies = [
 [[package]]
 name = "ton_liteapi"
 version = "0.1.0"
-source = "git+https://github.com/tonstack/lite-client?rev=18a2eae#18a2eae1ddc3b46e2ec7cd75c8b1685cbdd94876"
+source = "git+https://github.com/tonstack/lite-client?rev=86a7cfa#86a7cfa5228fd967e308be256a392f5a65ecd441"
 dependencies = [
  "adnl",
  "derivative",
