@@ -29,7 +29,7 @@
 | 🔜 | ListBlockTransactionsExt
 | 🔜 | GetLibraries
 | 🔜 | GetLibrariesWithProof
-| 🔜 | **low priority**
+| | **low priority**
 | 🔜 | GetTime
 | 🔜 | GetVersion
 | 🔜 | GetValidatorStats
