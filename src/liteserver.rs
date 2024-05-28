@@ -308,34 +308,34 @@ impl LiteServer {
     }
 
     pub async fn lookup_block(&self, req: LookupBlock) -> Result<BlockHeader> {
-        if req.id.workchain != -1 {
-            unimplemented!("search for basechain blocks")
-        }
-        let block_id = if let Some(utime) = req.utime {
-            unimplemented!("lookup by utime")
+        let shard = ShardIdent::with_tagged_prefix(req.id.workchain, req.id.shard)?;
+        let block = if let Some(utime) = req.utime {
+            self.engine.storage().block_storage().search_block_by_utime(&shard, utime)?
         } else if let Some(lt) = req.lt {
-            self.search_mc_block_by_lt(lt).await?
+            self.engine.storage().block_storage().search_block_by_lt(&shard, lt)?
         } else if req.seqno.is_some() {
-            self.search_mc_block_by_seqno(req.id.seqno).await?
+            self.engine.storage().block_storage().search_block_by_seqno(&shard, req.id.seqno)?
         } else {
             return Err(anyhow!("exactly one of utime, lt or seqno must be specified"))
         }.ok_or(anyhow!("no such block in db"))?;
         
-        let block_root = self.load_block_by_tonlabs_id(&block_id).await?.ok_or(anyhow!("no such block in db"))?;
+        let block_root = ton_types::deserialize_tree_of_cells(&mut block.as_ref())?;
         let merkle_proof = Self::make_block_proof(
-            block_root,
+            block_root.clone(),
             req.with_state_update.is_some(),
             req.with_value_flow.is_some(),
             req.with_extra.is_some(),
         )?;
 
+        let seqno = Block::construct_from_cell(block_root.clone())?.read_info()?.seq_no();
+
         Ok(BlockHeader {
             id: BlockIdExt {
-                workchain: block_id.shard_id.workchain_id(),
-                shard: block_id.shard_id.shard_prefix_with_tag(),
-                seqno: block_id.seq_no,
-                root_hash: Int256(*block_id.root_hash.as_array()),
-                file_hash: Int256(*block_id.file_hash.as_array()),
+                workchain: shard.workchain_id(),
+                shard: shard.shard_prefix_with_tag(),
+                seqno,
+                root_hash: Int256(*block_root.repr_hash().as_array()),
+                file_hash: Int256(*UInt256::calc_file_hash(&block).as_array()),
             },
             mode: (),
             header_proof: merkle_proof.write_to_bytes()?,
