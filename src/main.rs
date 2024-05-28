@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use argh::FromArgs;
+use metrics::set_global_recorder;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
@@ -71,6 +73,14 @@ async fn run(app: App) -> Result<()> {
         .ip_address
         .set_ip(broxus_util::resolve_public_ip(None).await?);
 
+    let builder = PrometheusBuilder::new();
+    let recorder = builder.install_recorder()?;
+
+    prometheus::default_registry()
+        .register(Box::new(
+            tokio_metrics_collector::default_runtime_collector(),
+        ))?;
+
     let global_config = read_global_config(app.global_config)?;
     let engine = Engine::new(
         config.indexer,
@@ -79,7 +89,7 @@ async fn run(app: App) -> Result<()> {
     )
     .await?;
     engine.start().await?;
-    web::run(engine.clone()).await?;
+    web::run(engine.clone(), recorder).await?;
     liteserver::run(engine.clone(), global_config);
     futures_util::future::pending().await
 }
