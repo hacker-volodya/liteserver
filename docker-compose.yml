@@ -2,7 +2,7 @@ version: '2'
 services:
   app:
     build: .
-    command: ["-c", "/config/config.yml", "--global-config", "/config/testnet-global.config.json"]
+    command: ["-c", "/config/config.yml", "--global-config", "/config/global.config.json"]
     ports:
       - 30303:30303/udp
       - 3000:3000/tcp
@@ -10,7 +10,6 @@ services:
     volumes:
       - data:/data
     restart: always
-    mem_limit: 6G
   explorer:
     build: explorer
     restart: always
@@ -21,5 +20,16 @@ services:
     restart: always
     ports:
       - 3001:3000
+  logs:
+    image: amir20/dozzle:v5.8.1
+    restart: unless-stopped
+    environment:
+      - DOZZLE_BASE=/logs
+      - DOZZLE_PASSWORD=root
+      - DOZZLE_USERNAME=root
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - 3002:8080
 volumes:
   data:
