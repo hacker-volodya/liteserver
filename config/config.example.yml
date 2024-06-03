@@ -1,8 +1,5 @@
 indexer:
   ip_address: 0.0.0.0:30303
-  adnl_keys:
-    dht_key: 8575ad83dbe59f724c549c36c8ab7a1884e0c6daa029a7b5efbf6d647b2d995f
-    overlay_key: a0568b1258e2684ab508cc935669b87f9e45f8326fea7d694896921568ea42b6
   rocks_db_path: /data/rocksdb
   file_db_path: /data/file
   state_gc_options: null
