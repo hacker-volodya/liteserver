@@ -88,9 +88,9 @@ async fn run(app: App) -> Result<()> {
         Arc::new(BlockSubscriber),
     )
     .await?;
-    engine.start().await?;
     web::run(engine.clone(), recorder).await?;
     liteserver::run(engine.clone(), global_config);
+    engine.start().await?;
     futures_util::future::pending().await
 }
 
