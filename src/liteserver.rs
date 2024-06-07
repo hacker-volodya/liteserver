@@ -256,38 +256,47 @@ impl LiteServer {
         Ok(result.map(|id| id.master_block_id().1))
     }
 
-    async fn search_transactions(&self, workchain: i8, account: &UInt256, mut lt: u64, count: Option<usize>) -> Result<(Vec<ton_block::BlockIdExt>, Vec<Transaction>)> {
+    async fn search_shard_block_by_lt(&self, prefix: &AccountIdPrefixFull, ltime: u64) -> Result<Option<Vec<u8>>> {
+        let full_shard = prefix.shard_ident()?;
+        let raw_prefix = full_shard.shard_prefix_with_tag();
+        // iterate through all possible shard prefixes (max_split = 4 for TON)
+        for prefix_len in 0..5 {
+            let shard = ShardIdent::with_prefix_len(prefix_len, prefix.workchain_id(), raw_prefix)?;
+            if let Some(block) = self.engine.storage().block_storage().search_block_by_lt(&shard, ltime)? {
+                return Ok(Some(block))
+            }
+        }
+        Ok(None)
+    }
+
+    async fn search_transactions(&self, workchain: i8, account: &UInt256, mut lt: u64, count: Option<usize>) -> Result<(Vec<BlockIdExt>, Vec<Transaction>)> {
         let prefix = AccountIdPrefixFull::prefix(&ton_block::MsgAddressInt::AddrStd(MsgAddrStd::with_address(None, workchain, AccountId::from_raw(account.as_slice().to_vec(), 256))))?;
         let mut transactions = Vec::new();
         let mut block_ids = Vec::new();
-        while let Some(mc_block) = self.search_mc_block_by_lt(lt).await? {
-            let block_id = if workchain != -1 {
-                // get an actual shard block which contains requested account
-                let mc_state = self.engine.load_state(&mc_block).await?;
-                let shard = mc_state.shard_state_extra()?.shards().find_shard_by_prefix(&prefix)?.ok_or(anyhow!("no such shard"))?;
-                shard.block_id().clone()
-            } else {
-                // if account is in masterchain, simply return masterchain block
-                mc_block
+        while let Some(block_raw) = self.search_shard_block_by_lt(&prefix, lt).await? {
+            let block_root = ton_types::deserialize_tree_of_cells(&mut block_raw.as_slice())?;
+            let block = Block::construct_from_cell(block_root.clone())?;
+            let block_info = block.read_info()?;
+            let block_id = BlockIdExt {
+                workchain: block_info.shard().workchain_id(),
+                shard: block_info.shard().shard_prefix_with_tag(),
+                seqno: block_info.seq_no(),
+                root_hash: Int256(*block_root.repr_hash().as_array()),
+                file_hash: Int256(*UInt256::calc_file_hash(&block_raw).as_array()),
             };
-            if let Some(block_cell) = self.load_block_by_tonlabs_id(&block_id).await? {
-                let block = Block::construct_from_cell(block_cell)?;
-                if let Some(account_block) = block.read_extra()?.read_account_blocks()?.get(account)? {
-                    block_ids.push(block_id);
-                    println!("we want lt {lt}");
-                    let complete = account_block.transactions().iterate_ext(true, None, |_, InRefValue(tx)| {
-                        if tx.lt != lt {
-                            return Ok(true)
-                        }
-                        println!("we got lt {} (wanted {}), next lt we want is {}", tx.lt, lt, tx.prev_trans_lt);
-                        lt = tx.prev_trans_lt;
-                        transactions.push(tx);
-                        Ok(if let Some(count) = count { transactions.len() < count } else { true })
-                    })?;
-                    if !complete {
-                        break
+            if let Some(account_block) = block.read_extra()?.read_account_blocks()?.get(account)? {
+                block_ids.push(block_id);
+                println!("we want lt {lt}");
+                let complete = account_block.transactions().iterate_ext(true, None, |_, InRefValue(tx)| {
+                    if tx.lt != lt {
+                        return Ok(true)
                     }
-                } else {
+                    println!("we got lt {} (wanted {}), next lt we want is {}", tx.lt, lt, tx.prev_trans_lt);
+                    lt = tx.prev_trans_lt;
+                    transactions.push(tx);
+                    Ok(if let Some(count) = count { transactions.len() < count } else { true })
+                })?;
+                if !complete {
                     break
                 }
             } else {
@@ -298,11 +307,11 @@ impl LiteServer {
     }
 
     pub async fn get_transactions(&self, req: GetTransactions) -> Result<TransactionList> {
-        let (blocks, transactions) = self.search_transactions(req.account.workchain as i8, &UInt256::from_slice(&req.account.id.0), req.lt, Some(req.count as usize)).await?;
+        let (ids, transactions) = self.search_transactions(req.account.workchain as i8, &UInt256::from_slice(&req.account.id.0), req.lt, Some(req.count as usize)).await?;
         let mut boc = Vec::new();
         BagOfCells::with_roots(transactions.iter().map(|tx| tx.serialize()).collect::<Result<Vec<_>>>()?.as_slice()).write_to(&mut boc, false)?;
         Ok(TransactionList {
-            ids: blocks.iter().map(|block| BlockIdExt { workchain: block.shard_id.workchain_id(), shard: block.shard_id.shard_prefix_with_tag(), seqno: block.seq_no, root_hash: Int256(*block.root_hash.as_array()), file_hash: Int256(*block.file_hash.as_array()) }).collect(),
+            ids,
             transactions: boc,
         })
     }
