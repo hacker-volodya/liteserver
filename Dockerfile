@@ -11,6 +11,14 @@ RUN --mount=type=cache,target=/var/cache/buildkit \
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 COPY --from=builder /ton-node /usr/local/bin
-COPY config /config
-EXPOSE 3000
+VOLUME /data
 ENTRYPOINT ["/usr/local/bin/ton-node"]
+
+# http
+EXPOSE 3000/tcp
+
+# liteapi
+EXPOSE 3333/tcp
+
+# nodes p2p
+EXPOSE 30303/udp

@@ -26,3 +26,5 @@ x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 metrics = "0.22.3"
 metrics-exporter-prometheus = { version = "0.14.0", default-features = false }
 tokio-metrics-collector = { version = "0.2.1", features = ["rt"] }
+ureq = "2.9.7"
+fs_extra = "1.3.0"
