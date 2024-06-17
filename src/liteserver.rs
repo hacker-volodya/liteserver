@@ -213,8 +213,33 @@ impl LiteServer {
     }
 
     pub async fn get_account_state(&self, req: GetAccountState) -> Result<AccountState> {
-        let block = self.load_block(&req.id).await?.ok_or(anyhow!("no such block in db"))?;
-        let state_stuff = self.load_state(&req.id).await?;
+        let (block_id, block, state_stuff) = if req.id.seqno != 0xffff_ffff {
+            (req.id.clone(), self.load_block(&req.id).await?.ok_or(anyhow!("no such block in db"))?, self.load_state(&req.id).await?)
+        } else {
+            // fetch latest account state
+            let last_mc = self.engine.load_last_applied_mc_block_id()?;
+            let block = self.load_block_by_tonlabs_id(&last_mc).await?.ok_or(anyhow!("no such block in db"))?;
+            let (id, block) = if req.account.workchain != -1 {
+                let block = Block::construct_from_cell(block)?;
+                let extra = block.read_extra()?;
+                let extra = extra.read_custom()?.ok_or(anyhow!("bug: mc block must contain McBlockExtra"))?;
+                let shard = extra.hashes().find_shard_by_prefix(&AccountIdPrefixFull::prefix(&ton_block::MsgAddressInt::AddrStd(MsgAddrStd::with_address(None, req.account.workchain as i8, AccountId::from_raw(req.account.id.0.to_vec(), 256))))?)?.ok_or(anyhow!("no such shard"))?;
+                let id = shard.blk_id();
+                let block = self.load_block_by_tonlabs_id(&id).await?.ok_or(anyhow!("no such block in db"))?;
+                (id.clone(), block)
+            } else {
+                (last_mc, block)
+            };
+            let state_stuff = self.engine.load_state(&id).await?;
+            
+            (BlockIdExt {
+                workchain: id.shard().workchain_id(),
+                shard: id.shard().shard_prefix_with_tag(),
+                seqno: id.seq_no,
+                root_hash: Int256(*id.root_hash.as_array()),
+                file_hash: Int256(*id.file_hash.as_array()),
+            }, block, state_stuff)
+        };
         let usage_tree_p2 = UsageTree::with_root(state_stuff.root_cell().clone());
         let state = ShardStateUnsplit::construct_from_cell(usage_tree_p2.root_cell())?;
         let account = state
@@ -225,7 +250,7 @@ impl LiteServer {
         let proof2 = MerkleProof::create_by_usage_tree(state_stuff.root_cell(), usage_tree_p2)?;
         let mut proof = Vec::new();
         BagOfCells::with_roots(&[proof1.serialize()?, proof2.serialize()?]).write_to(&mut proof, false)?;
-        Ok(AccountState { id: req.id.clone(), shardblk: req.id, shard_proof: Vec::new(), proof, state: serialize_toc(&account.account_cell())? })
+        Ok(AccountState { id: req.id, shardblk: block_id, shard_proof: Vec::new(), proof, state: serialize_toc(&account.account_cell())? })
     }
 
     async fn search_mc_block_by_lt(&self, ltime: u64) -> Result<Option<ton_block::BlockIdExt>> {
