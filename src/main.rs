@@ -3,6 +3,7 @@
 mod liteserver;
 mod web;
 mod utils;
+mod tracing_utils;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -11,7 +12,6 @@ use anyhow::Result;
 use argh::FromArgs;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
 use ton_indexer::{Engine, GlobalConfig, NodeConfig, Subscriber};
 
@@ -40,12 +40,7 @@ pub struct App {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let logger = tracing_subscriber::fmt().with_span_events(FmtSpan::CLOSE).with_env_filter(
-        EnvFilter::builder()
-            .with_default_directive(tracing::Level::INFO.into())
-            .from_env_lossy(),
-    );
-    logger.init();
+    tracing_utils::init();
 
     let any_signal = broxus_util::any_signal(broxus_util::TERMINATION_SIGNALS);
 
@@ -56,6 +51,7 @@ async fn main() -> Result<()> {
         signal = any_signal => {
             if let Ok(signal) = signal {
                 tracing::warn!(?signal, "received termination signal, flushing state...");
+                tracing_utils::shutdown();
             }
             // NOTE: engine future is safely dropped here so rocksdb method
             // `rocksdb_close` is called in DB object destructor
