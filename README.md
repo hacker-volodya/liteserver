@@ -41,13 +41,14 @@ services:
 | | **impemented**
 | ✅ | WaitMasterchainSeqno
 | ✅ | GetMasterchainInfo
+| ✅ | GetMasterchainInfoExt
 | ✅ | GetBlockHeader
 | ✅ | GetAllShardsInfo
 | ✅ | ListBlockTransactions
 | ✅ | GetBlock
 | ✅ | GetAccountState | no shard_proof for now
-| ⚠️ | GetTransactions | lt block search in progress
-| ✅ | LookupBlock | utime search is not working for now
+| ✅ | GetTransactions
+| ✅ | LookupBlock
 | | **high priority** (toncenter)
 | ⚠️ | SendMessage | TVM required
 | 🔜 | GetConfigParams

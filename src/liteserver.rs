@@ -1,6 +1,7 @@
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use anyhow::{anyhow, Result};
+use broxus_util::now;
 use futures_util::future::BoxFuture;
 use ton_block::{AccountIdPrefixFull, Block, Deserializable, GetRepresentationHash, HashmapAugType, InRefValue, MerkleProof, MsgAddrStd, Serializable, ShardIdent, ShardStateUnsplit, Transaction, TraverseNextStep};
 use ton_indexer::{utils::ShardStateStuff, Engine, GlobalConfig};
@@ -10,9 +11,9 @@ use ton_liteapi::{
     tl::{
         common::{BlockIdExt, Int256, ZeroStateIdExt},
         request::{
-            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetConfigAll, GetTransactions, ListBlockTransactions, LookupBlock, Request, WaitMasterchainSeqno, WrappedRequest
+            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetConfigAll, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, Request, WaitMasterchainSeqno, WrappedRequest
         },
-        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, Response, TransactionId, TransactionList},
+        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, MasterchainInfoExt, Response, TransactionId, TransactionList},
     },
     types::LiteError,
 };
@@ -46,6 +47,35 @@ impl LiteServer {
                 root_hash: Int256(self.config.zero_state.root_hash.into()),
                 file_hash: Int256(self.config.zero_state.file_hash.into()),
             },
+        })
+    }
+
+    pub async fn get_masterchain_info_ext(&self, req: GetMasterchainInfoExt) -> Result<MasterchainInfoExt> {
+        if req.mode != 0 {
+            return Err(anyhow!("Unsupported mode"));
+        }
+        let last = self.engine.load_last_applied_mc_block_id()?;
+        let state = self.engine.load_state(&last).await?;
+        let root_hash = state.root_cell().repr_hash();
+        Ok(MasterchainInfoExt {
+            last: BlockIdExt {
+                workchain: last.shard_id.workchain_id(),
+                shard: last.shard_id.shard_prefix_with_tag(),
+                seqno: last.seq_no,
+                root_hash: Int256(last.root_hash.into()),
+                file_hash: Int256(last.file_hash.into()),
+            },
+            state_root_hash: Int256(root_hash.into()),
+            init: ZeroStateIdExt {
+                workchain: self.config.zero_state.shard_id.workchain_id(),
+                root_hash: Int256(self.config.zero_state.root_hash.into()),
+                file_hash: Int256(self.config.zero_state.file_hash.into()),
+            },
+            mode: (),
+            version: 0x101,
+            capabilities: 7,
+            last_utime: state.state().gen_time(),
+            now: now(),
         })
     }
 
@@ -405,6 +435,9 @@ impl LiteServer {
         match req.request {
             Request::GetMasterchainInfo => Ok(Response::MasterchainInfo(
                 self.get_masterchain_info().await?,
+            )),
+            Request::GetMasterchainInfoExt(req) => Ok(Response::MasterchainInfoExt(
+                self.get_masterchain_info_ext(req).await?,
             )),
             Request::GetBlockHeader(req) => {
                 Ok(Response::BlockHeader(self.get_block_header(req).await?))
