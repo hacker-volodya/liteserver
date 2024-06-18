@@ -427,7 +427,7 @@ impl LiteServer {
             Request::LookupBlock(req) => Ok(Response::BlockHeader(
                 self.lookup_block(req).await?,
             )),
-            _ => Err(anyhow!("unimplemented")),
+            _ => Err(anyhow!("unimplemented method: {:?}", req.request)),
         }
     }
 }
