@@ -9,7 +9,7 @@ use ton_liteapi::{
     layers::{UnwrapMessagesLayer, WrapErrorLayer},
     server::serve,
     tl::{
-        common::{BlockIdExt, Int256, ZeroStateIdExt},
+        common::{AccountId, BlockIdExt, Int256, ZeroStateIdExt},
         request::{
             GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetConfigAll, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, Request, WaitMasterchainSeqno, WrappedRequest
         },
@@ -17,7 +17,7 @@ use ton_liteapi::{
     },
     types::LiteError,
 };
-use ton_types::{serialize_toc, AccountId, BagOfCells, Cell, UInt256, UsageTree};
+use ton_types::{serialize_toc, BagOfCells, Cell, UInt256, UsageTree};
 use tower::{make::Shared, Service, ServiceBuilder};
 use x25519_dalek::StaticSecret;
 
@@ -34,13 +34,7 @@ impl LiteServer {
         let last = self.engine.load_last_applied_mc_block_id()?;
         let root_hash = self.engine.load_state(&last).await?.root_cell().repr_hash();
         Ok(MasterchainInfo {
-            last: BlockIdExt {
-                workchain: last.shard_id.workchain_id(),
-                shard: last.shard_id.shard_prefix_with_tag(),
-                seqno: last.seq_no,
-                root_hash: Int256(last.root_hash.into()),
-                file_hash: Int256(last.file_hash.into()),
-            },
+            last: last.as_liteapi(),
             state_root_hash: Int256(root_hash.into()),
             init: ZeroStateIdExt {
                 workchain: self.config.zero_state.shard_id.workchain_id(),
@@ -58,13 +52,7 @@ impl LiteServer {
         let state = self.engine.load_state(&last).await?;
         let root_hash = state.root_cell().repr_hash();
         Ok(MasterchainInfoExt {
-            last: BlockIdExt {
-                workchain: last.shard_id.workchain_id(),
-                shard: last.shard_id.shard_prefix_with_tag(),
-                seqno: last.seq_no,
-                root_hash: Int256(last.root_hash.into()),
-                file_hash: Int256(last.file_hash.into()),
-            },
+            last: last.as_liteapi(),
             state_root_hash: Int256(root_hash.into()),
             init: ZeroStateIdExt {
                 workchain: self.config.zero_state.shard_id.workchain_id(),
@@ -107,13 +95,7 @@ impl LiteServer {
     }
 
     async fn load_block(&self, block_id: &BlockIdExt) -> Result<Option<Cell>> {
-        let tonlabs_block_id = ton_block::BlockIdExt {
-            shard_id: ShardIdent::with_tagged_prefix(block_id.workchain, block_id.shard)?,
-            seq_no: block_id.seqno,
-            root_hash: UInt256::from_slice(&block_id.root_hash.0),
-            file_hash: UInt256::from_slice(&block_id.file_hash.0),
-        };
-        self.load_block_by_tonlabs_id(&tonlabs_block_id).await
+        self.load_block_by_tonlabs_id(&block_id.as_tonlabs()?).await
     }
 
     async fn load_block_by_tonlabs_id(&self, tonlabs_block_id: &ton_block::BlockIdExt) -> Result<Option<Cell>> {
@@ -130,13 +112,7 @@ impl LiteServer {
     }
 
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
-        let tonlabs_block_id = ton_block::BlockIdExt {
-            shard_id: ShardIdent::with_tagged_prefix(block_id.workchain, block_id.shard)?,
-            seq_no: block_id.seqno,
-            root_hash: UInt256::from_slice(&block_id.root_hash.0),
-            file_hash: UInt256::from_slice(&block_id.file_hash.0),
-        };
-        self.engine.load_state(&tonlabs_block_id).await
+        self.engine.load_state(&block_id.as_tonlabs()?).await
     }
 
     pub async fn get_block(&self, request: GetBlock) -> Result<BlockData> {
@@ -253,7 +229,7 @@ impl LiteServer {
                 let block = Block::construct_from_cell(block)?;
                 let extra = block.read_extra()?;
                 let extra = extra.read_custom()?.ok_or(anyhow!("bug: mc block must contain McBlockExtra"))?;
-                let shard = extra.hashes().find_shard_by_prefix(&AccountIdPrefixFull::prefix(&ton_block::MsgAddressInt::AddrStd(MsgAddrStd::with_address(None, req.account.workchain as i8, AccountId::from_raw(req.account.id.0.to_vec(), 256))))?)?.ok_or(anyhow!("no such shard"))?;
+                let shard = extra.hashes().find_shard_by_prefix(&req.account.prefix_full()?)?.ok_or(anyhow!("no such shard"))?;
                 let id = shard.blk_id();
                 let block = self.load_block_by_tonlabs_id(&id).await?.ok_or(anyhow!("no such block in db"))?;
                 (id.clone(), block)
@@ -262,19 +238,13 @@ impl LiteServer {
             };
             let state_stuff = self.engine.load_state(&id).await?;
             
-            (BlockIdExt {
-                workchain: id.shard().workchain_id(),
-                shard: id.shard().shard_prefix_with_tag(),
-                seqno: id.seq_no,
-                root_hash: Int256(*id.root_hash.as_array()),
-                file_hash: Int256(*id.file_hash.as_array()),
-            }, block, state_stuff)
+            (id.as_liteapi(), block, state_stuff)
         };
         let usage_tree_p2 = UsageTree::with_root(state_stuff.root_cell().clone());
         let state = ShardStateUnsplit::construct_from_cell(usage_tree_p2.root_cell())?;
         let account = state
             .read_accounts()?
-            .account(&AccountId::from_raw(req.account.id.0.to_vec(), 256))?
+            .account(&req.account.id())?
             .ok_or(anyhow!("no such account"))?;
         let proof1 = Self::make_block_proof(block, true, false, false)?;
         let proof2 = MerkleProof::create_by_usage_tree(state_stuff.root_cell(), usage_tree_p2)?;
@@ -324,11 +294,10 @@ impl LiteServer {
         Ok(None)
     }
 
-    async fn search_transactions(&self, workchain: i8, account: &UInt256, mut lt: u64, count: Option<usize>) -> Result<(Vec<BlockIdExt>, Vec<Transaction>)> {
-        let prefix = AccountIdPrefixFull::prefix(&ton_block::MsgAddressInt::AddrStd(MsgAddrStd::with_address(None, workchain, AccountId::from_raw(account.as_slice().to_vec(), 256))))?;
+    async fn search_transactions(&self, account: &AccountId, mut lt: u64, count: Option<usize>) -> Result<(Vec<BlockIdExt>, Vec<Transaction>)> {
         let mut transactions = Vec::new();
         let mut block_ids = Vec::new();
-        while let Some(block_raw) = self.search_shard_block_by_lt(&prefix, lt).await? {
+        while let Some(block_raw) = self.search_shard_block_by_lt(&account.prefix_full()?, lt).await? {
             let block_root = ton_types::deserialize_tree_of_cells(&mut block_raw.as_slice())?;
             let block = Block::construct_from_cell(block_root.clone())?;
             let block_info = block.read_info()?;
@@ -339,7 +308,7 @@ impl LiteServer {
                 root_hash: Int256(*block_root.repr_hash().as_array()),
                 file_hash: Int256(*UInt256::calc_file_hash(&block_raw).as_array()),
             };
-            if let Some(account_block) = block.read_extra()?.read_account_blocks()?.get(account)? {
+            if let Some(account_block) = block.read_extra()?.read_account_blocks()?.get(&account.raw_id())? {
                 block_ids.push(block_id);
                 println!("we want lt {lt}");
                 let complete = account_block.transactions().iterate_ext(true, None, |_, InRefValue(tx)| {
@@ -362,7 +331,7 @@ impl LiteServer {
     }
 
     pub async fn get_transactions(&self, req: GetTransactions) -> Result<TransactionList> {
-        let (ids, transactions) = self.search_transactions(req.account.workchain as i8, &UInt256::from_slice(&req.account.id.0), req.lt, Some(req.count as usize)).await?;
+        let (ids, transactions) = self.search_transactions(&req.account, req.lt, Some(req.count as usize)).await?;
         let mut boc = Vec::new();
         BagOfCells::with_roots(transactions.iter().map(|tx| tx.serialize()).collect::<Result<Vec<_>>>()?.as_slice()).write_to(&mut boc, false)?;
         Ok(TransactionList {
@@ -505,4 +474,60 @@ pub fn run(engine: Arc<Engine>, config: GlobalConfig) {
             .await
             .expect("liteserver error");
     });
+}
+
+trait BlockIdExtAsTonlabs {
+    fn as_tonlabs(&self) -> Result<ton_block::BlockIdExt>;
+}
+
+trait BlockIdExtAsLiteapi {
+    fn as_liteapi(&self) -> ton_liteapi::tl::common::BlockIdExt;
+}
+
+impl BlockIdExtAsTonlabs for ton_liteapi::tl::common::BlockIdExt {
+    fn as_tonlabs(&self) -> Result<ton_block::BlockIdExt> {
+        Ok(ton_block::BlockIdExt {
+            shard_id: ShardIdent::with_tagged_prefix(self.workchain, self.shard)?,
+            seq_no: self.seqno,
+            root_hash: UInt256::from_slice(&self.root_hash.0),
+            file_hash: UInt256::from_slice(&self.file_hash.0),
+        })
+    }
+}
+
+impl BlockIdExtAsLiteapi for ton_block::BlockIdExt {
+    fn as_liteapi(&self) -> ton_liteapi::tl::common::BlockIdExt {
+        ton_liteapi::tl::common::BlockIdExt {
+            workchain: self.shard().workchain_id(),
+            shard: self.shard().shard_prefix_with_tag(),
+            seqno: self.seq_no,
+            root_hash: Int256(*self.root_hash.as_array()),
+            file_hash: Int256(*self.file_hash.as_array()),
+        }
+    }
+}
+
+trait AccountIdAsTonlabs {
+    fn prefix_full(&self) -> Result<ton_block::AccountIdPrefixFull>;
+    fn std(&self) -> ton_block::MsgAddrStd;
+    fn raw_id(&self) -> UInt256;
+    fn id(&self) -> ton_types::AccountId;
+}
+
+impl AccountIdAsTonlabs for ton_liteapi::tl::common::AccountId {
+    fn std(&self) -> ton_block::MsgAddrStd {
+        MsgAddrStd::with_address(None, self.workchain as i8, ton_types::AccountId::from_raw(self.id.0.to_vec(),256))
+    }
+
+    fn prefix_full(&self) -> Result<ton_block::AccountIdPrefixFull> {
+        ton_block::AccountIdPrefixFull::prefix(&ton_block::MsgAddressInt::AddrStd(self.std()))
+    }
+
+    fn raw_id(&self) -> UInt256 {
+        UInt256::from_slice(&self.id.0)
+    }
+
+    fn id(&self) -> ton_types::AccountId {
+        ton_types::AccountId::from_raw(self.id.0.to_vec(), 256)
+    }
 }
