@@ -427,7 +427,7 @@ impl LiteServer {
         }
     }
 
-    #[tracing::instrument(skip(self), level = "info", err)]
+    #[tracing::instrument(skip(self), level = "debug", fields(prefix=req.wait_masterchain_seqno.is_some(), method=format!("{:?}", req.request).split('(').next().unwrap()), err(level = tracing::Level::DEBUG))]
     async fn call_impl(&self, req: WrappedRequest) -> Result<Response> {
         if let Some(wait_req) = req.wait_masterchain_seqno {
             self.wait_masterchain_seqno(wait_req).await?;
