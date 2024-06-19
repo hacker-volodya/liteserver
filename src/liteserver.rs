@@ -218,39 +218,40 @@ impl LiteServer {
         })
     }
 
+    async fn get_block_for_account(&self, account: &AccountId, reference_block: &ton_block::BlockIdExt) -> Result<ton_block::BlockIdExt> {
+        if !reference_block.shard().is_masterchain() || account.workchain == -1 {
+            return Ok(reference_block.clone())
+        }
+        let mc_block_root = self.load_block_by_tonlabs_id(&reference_block).await?.ok_or(anyhow!("no such block in db"))?;
+        let mc_block = Block::construct_from_cell(mc_block_root)?;
+        let mc_shard_record = mc_block
+            .read_extra()?
+            .read_custom()?.ok_or(anyhow!("bug: mc block must contain McBlockExtra"))?
+            .hashes().find_shard_by_prefix(&account.prefix_full()?)?.ok_or(anyhow!("no such shard"))?;
+        let shard_block = mc_shard_record.blk_id();
+        Ok(shard_block.clone())
+    }
+
     pub async fn get_account_state(&self, req: GetAccountState) -> Result<AccountState> {
-        let (block_id, block, state_stuff) = if req.id.seqno != 0xffff_ffff {
-            (req.id.clone(), self.load_block(&req.id).await?.ok_or(anyhow!("no such block in db"))?, self.load_state(&req.id).await?)
+        let reference_id = if req.id.seqno != 0xffff_ffff {
+            req.id.as_tonlabs()?
         } else {
-            // fetch latest account state
-            let last_mc = self.engine.load_last_applied_mc_block_id()?;
-            let block = self.load_block_by_tonlabs_id(&last_mc).await?.ok_or(anyhow!("no such block in db"))?;
-            let (id, block) = if req.account.workchain != -1 {
-                let block = Block::construct_from_cell(block)?;
-                let extra = block.read_extra()?;
-                let extra = extra.read_custom()?.ok_or(anyhow!("bug: mc block must contain McBlockExtra"))?;
-                let shard = extra.hashes().find_shard_by_prefix(&req.account.prefix_full()?)?.ok_or(anyhow!("no such shard"))?;
-                let id = shard.blk_id();
-                let block = self.load_block_by_tonlabs_id(&id).await?.ok_or(anyhow!("no such block in db"))?;
-                (id.clone(), block)
-            } else {
-                (last_mc, block)
-            };
-            let state_stuff = self.engine.load_state(&id).await?;
-            
-            (id.as_liteapi(), block, state_stuff)
+            self.engine.load_last_applied_mc_block_id()?
         };
+        let shard_id = self.get_block_for_account(&req.account, &reference_id).await?;
+        let shard_block = self.load_block_by_tonlabs_id(&shard_id).await?.ok_or(anyhow!("no such block in db"))?;
+        let state_stuff = self.engine.load_state(&shard_id).await?;
         let usage_tree_p2 = UsageTree::with_root(state_stuff.root_cell().clone());
         let state = ShardStateUnsplit::construct_from_cell(usage_tree_p2.root_cell())?;
         let account = state
             .read_accounts()?
             .account(&req.account.id())?
             .ok_or(anyhow!("no such account"))?;
-        let proof1 = Self::make_block_proof(block, true, false, false)?;
+        let proof1 = Self::make_block_proof(shard_block, true, false, false)?;
         let proof2 = MerkleProof::create_by_usage_tree(state_stuff.root_cell(), usage_tree_p2)?;
         let mut proof = Vec::new();
         BagOfCells::with_roots(&[proof1.serialize()?, proof2.serialize()?]).write_to(&mut proof, false)?;
-        Ok(AccountState { id: req.id, shardblk: block_id, shard_proof: Vec::new(), proof, state: serialize_toc(&account.account_cell())? })
+        Ok(AccountState { id: reference_id.as_liteapi(), shardblk: shard_id.as_liteapi(), shard_proof: Vec::new(), proof, state: serialize_toc(&account.account_cell())? })
     }
 
     async fn search_mc_block_by_lt(&self, ltime: u64) -> Result<Option<ton_block::BlockIdExt>> {
