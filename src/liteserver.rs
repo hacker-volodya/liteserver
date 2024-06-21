@@ -282,6 +282,7 @@ impl LiteServer {
         Ok(result.map(|id| id.master_block_id().1))
     }
 
+    #[tracing::instrument(skip(self), level = "debug", err)]
     async fn search_shard_block_by_lt(&self, prefix: &AccountIdPrefixFull, ltime: u64) -> Result<Option<Vec<u8>>> {
         let full_shard = prefix.shard_ident()?;
         let raw_prefix = full_shard.shard_prefix_with_tag();
@@ -295,6 +296,7 @@ impl LiteServer {
         Ok(None)
     }
 
+    #[tracing::instrument(skip(self), level = "debug", err)]
     async fn search_transactions(&self, account: &AccountId, mut lt: u64, count: Option<usize>) -> Result<(Vec<BlockIdExt>, Vec<Transaction>)> {
         let mut transactions = Vec::new();
         let mut block_ids = Vec::new();
