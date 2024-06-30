@@ -3,7 +3,7 @@ use std::{sync::Arc, task::Poll, time::Duration};
 use anyhow::{anyhow, Result};
 use broxus_util::now;
 use futures_util::future::BoxFuture;
-use ton_block::{AccountIdPrefixFull, Block, Deserializable, GetRepresentationHash, HashmapAugType, InRefValue, MerkleProof, MsgAddrStd, Serializable, ShardIdent, ShardStateUnsplit, Transaction, TraverseNextStep};
+use ton_block::{AccountIdPrefixFull, Block, ConfigParams, Deserializable, GetRepresentationHash, HashmapAugType, InRefValue, MerkleProof, MsgAddrStd, Serializable, ShardIdent, ShardStateUnsplit, Transaction, TraverseNextStep};
 use ton_indexer::{utils::ShardStateStuff, Engine, GlobalConfig};
 use ton_liteapi::{
     layers::{UnwrapMessagesLayer, WrapErrorLayer},
@@ -17,7 +17,7 @@ use ton_liteapi::{
     },
     types::LiteError,
 };
-use ton_types::{serialize_toc, BagOfCells, Cell, UInt256, UsageTree};
+use ton_types::{serialize_toc, BagOfCells, Cell, SliceData, UInt256, UsageTree};
 use tower::{make::Shared, Service, ServiceBuilder};
 use x25519_dalek::StaticSecret;
 
@@ -72,6 +72,8 @@ impl LiteServer {
         with_state_update: bool,
         with_value_flow: bool,
         with_extra: bool,
+        with_shard_hashes: bool,
+        config_params: Vec<u8>
     ) -> Result<MerkleProof> {
         let usage_tree = UsageTree::with_root(block_root.clone());
         let block = Block::construct_from_cell(usage_tree.root_cell())?;
@@ -383,15 +385,51 @@ impl LiteServer {
         })  
     }
 
-    fn make_state_proof(state_root: Cell, with_accounts: bool, with_prev_blocks: bool) -> Result<MerkleProof> {
+    fn update_config_params(params: &mut Vec<i32>, with_validator_set: bool, with_special_smc: bool, with_workchain_info: bool, with_capabilities: bool) -> Result<()> {
+        if with_validator_set {
+            params.push(34);
+        }
+        if with_special_smc {
+            params.push(31);
+        }
+        if with_workchain_info {
+            params.push(12);
+        }
+        if with_capabilities {
+            params.push(8);
+        }
+        Ok(())
+    }
+
+    fn touch_config(config: &ConfigParams, with_params: &[i32]) -> Result<()> {
+        fn preload_param(config: &ConfigParams, param: i32) -> Result<()> {
+            let key = SliceData::load_builder(param.write_to_new_cell()?)?;
+            let slice = config.config_params.get(key)?.ok_or(anyhow!("no such param {param}"))?; 
+            let cell = slice.reference_opt(0).ok_or(anyhow!("no such reference in param {param}"))?;
+            cell.preload_with_depth_hint::<32>()?;
+            Ok(())
+        }
+        for i in with_params {
+            preload_param(config, *i)?;
+        }
+        Ok(())
+    }
+
+    fn make_state_proof(state_root: Cell, params: &[i32], with_accounts: bool, with_prev_blocks: bool, with_shard_hashes: bool) -> Result<MerkleProof> {
         let usage_tree = UsageTree::with_root(state_root.clone());
         let state = ShardStateUnsplit::construct_from_cell(usage_tree.root_cell())?;
         if with_accounts {
             state.read_accounts()?;
         }
         let custom = state.read_custom()?.ok_or(anyhow!("no custom data in state"))?;
-        let mut counter = 0;
-        let _ = custom.prev_blocks.iterate_ext(true, None, |_, _| { counter += 1; Ok(counter < 16) })?;
+        if with_prev_blocks {
+            let mut counter = 0;
+            let _ = custom.prev_blocks.iterate_ext(true, None, |_, _| { counter += 1; Ok(counter < 16) })?;
+        }
+        if with_shard_hashes {
+            let _ = custom.shards.root().ok_or(anyhow!("no shards in state"))?.preload_with_depth_hint::<32>()?;
+        }
+        Self::touch_config(config, with_params)
         Ok(MerkleProof::create_by_usage_tree(&state_root, usage_tree)?)
     }
 
@@ -399,6 +437,7 @@ impl LiteServer {
         if req.id.workchain != -1 {
             return Err(anyhow!("requested block is not in masterchain"))
         }
+        Self::update_config_params(&mut req.param_list, req.with_validator_set.is_some(), req.with_special_smc.is_some(), req.with_workchain_info.is_some(), req.with_capabilities.is_some())?;
         let block_root = self.load_block_by_tonlabs_id(&req.id.as_tonlabs()?).await?.ok_or(anyhow!("no such block in db"))?;
         let block = Block::construct_from_cell(block_root.clone())?;
         if req.extract_from_key_block.is_some() {
@@ -420,6 +459,10 @@ impl LiteServer {
                 with_accounts_root: req.with_accounts_root,
                 with_prev_blocks: req.with_prev_blocks,
                 extract_from_key_block: req.extract_from_key_block,
+                with_validator_set: req.with_validator_set,
+                with_special_smc: req.with_special_smc,
+                with_workchain_info: req.with_workchain_info,
+                with_capabilities: req.with_capabilities,
             })
         } else {
             let state_root = self.load_state(&req.id).await?.root_cell().clone();
@@ -430,7 +473,12 @@ impl LiteServer {
                 mode: (),
                 id: req.id,
                 state_proof: Self::make_block_proof(block_root, true, false, false)?.write_to_bytes()?,
-                config_proof: Self::make_state_proof(state_root, req.with_accounts_root.is_some(), req.with_prev_blocks.is_some())?.write_to_bytes()?,
+                config_proof: Self::make_state_proof(
+                    state_root, 
+                    req.with_accounts_root.is_some(), 
+                    req.with_prev_blocks.is_some(), 
+                    req.with_shard_hashes.is_some()
+                )?.write_to_bytes()?,
                 with_state_root: req.with_state_root,
                 with_libraries: req.with_libraries,
                 with_state_extra_root: req.with_state_extra_root,
@@ -438,6 +486,10 @@ impl LiteServer {
                 with_accounts_root: req.with_accounts_root,
                 with_prev_blocks: req.with_accounts_root,
                 extract_from_key_block: req.extract_from_key_block,
+                with_validator_set: req.with_validator_set,
+                with_special_smc: req.with_special_smc,
+                with_workchain_info: req.with_workchain_info,
+                with_capabilities: req.with_capabilities,
             })
         }
         
