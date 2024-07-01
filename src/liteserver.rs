@@ -17,7 +17,7 @@ use ton_liteapi::{
     },
     types::LiteError,
 };
-use ton_types::{serialize_toc, BagOfCells, Cell, SliceData, UInt256, UsageTree};
+use ton_types::{serialize_toc, BagOfCells, Cell, HashmapType, SliceData, UInt256, UsageTree};
 use tower::{make::Shared, Service, ServiceBuilder};
 use x25519_dalek::StaticSecret;
 
@@ -73,7 +73,8 @@ impl LiteServer {
         with_value_flow: bool,
         with_extra: bool,
         with_shard_hashes: bool,
-        config_params: Vec<u8>
+        with_config: bool,
+        config_params: Option<&[i32]>
     ) -> Result<MerkleProof> {
         let usage_tree = UsageTree::with_root(block_root.clone());
         let block = Block::construct_from_cell(usage_tree.root_cell())?;
@@ -90,9 +91,16 @@ impl LiteServer {
             block.read_value_flow()?.read_in_full_depth()?;
         }
         if with_extra {
-            let _mc_block_extra = block.read_extra()?.read_custom()?;
+            let mc_block_extra = block.read_extra()?.read_custom()?;
+            if let Some(extra) = mc_block_extra {
+                if with_shard_hashes {
+                    extra.shards().root().ok_or(anyhow!("no shard hashes"))?.preload_with_depth_hint::<128>()?;
+                }
+                if with_config {
+                    Self::touch_config(extra.config().ok_or(anyhow!("no config"))?, config_params)?;
+                }
+            }
         }
-
         MerkleProof::create_by_usage_tree(&block_root, usage_tree)
     }
 
@@ -129,6 +137,9 @@ impl LiteServer {
             request.with_state_update.is_some(),
             request.with_value_flow.is_some(),
             request.with_extra.is_some(),
+            false,
+            false,
+            None,
         )?;
 
         Ok(BlockHeader {
@@ -147,7 +158,7 @@ impl LiteServer {
         let block_root = self.load_block(&request.id).await?.ok_or(anyhow!("no such block in db"))?;
 
         // proof1: from block to shardstate update
-        let proof1 = Self::make_block_proof(block_root, true, false, false)?;
+        let proof1 = Self::make_block_proof(block_root, true, false, false, false, false, None)?;
 
         // proof2: from shardstate root to shard_hashes
         let state_stuff = self.load_state(&request.id).await?;
@@ -249,7 +260,7 @@ impl LiteServer {
             .read_accounts()?
             .account(&req.account.id())?
             .ok_or(anyhow!("no such account"))?;
-        let proof1 = Self::make_block_proof(shard_block, true, false, false)?;
+        let proof1 = Self::make_block_proof(shard_block, true, false, false, false, false, None)?;
         let proof2 = MerkleProof::create_by_usage_tree(state_stuff.root_cell(), usage_tree_p2)?;
         let mut proof = Vec::new();
         BagOfCells::with_roots(&[proof1.serialize()?, proof2.serialize()?]).write_to(&mut proof, false)?;
@@ -363,6 +374,9 @@ impl LiteServer {
             req.with_state_update.is_some(),
             req.with_value_flow.is_some(),
             req.with_extra.is_some(),
+            false,
+            false,
+            None,
         )?;
 
         let seqno = Block::construct_from_cell(block_root.clone())?.read_info()?.seq_no();
@@ -401,7 +415,7 @@ impl LiteServer {
         Ok(())
     }
 
-    fn touch_config(config: &ConfigParams, with_params: &[i32]) -> Result<()> {
+    fn touch_config(config: &ConfigParams, with_params: Option<&[i32]>) -> Result<()> {
         fn preload_param(config: &ConfigParams, param: i32) -> Result<()> {
             let key = SliceData::load_builder(param.write_to_new_cell()?)?;
             let slice = config.config_params.get(key)?.ok_or(anyhow!("no such param {param}"))?; 
@@ -409,13 +423,17 @@ impl LiteServer {
             cell.preload_with_depth_hint::<32>()?;
             Ok(())
         }
-        for i in with_params {
-            preload_param(config, *i)?;
+        if let Some(with_params) = with_params {
+            for i in with_params {
+                preload_param(config, *i)?;
+            }
+        } else {
+            config.config_params.data().ok_or(anyhow!("no config"))?.preload_with_depth_hint::<128>()?;
         }
         Ok(())
     }
 
-    fn make_state_proof(state_root: Cell, params: &[i32], with_accounts: bool, with_prev_blocks: bool, with_shard_hashes: bool) -> Result<MerkleProof> {
+    fn make_state_proof(state_root: Cell, params: Option<&[i32]>, with_accounts: bool, with_prev_blocks: bool, with_shard_hashes: bool) -> Result<MerkleProof> {
         let usage_tree = UsageTree::with_root(state_root.clone());
         let state = ShardStateUnsplit::construct_from_cell(usage_tree.root_cell())?;
         if with_accounts {
@@ -429,11 +447,11 @@ impl LiteServer {
         if with_shard_hashes {
             let _ = custom.shards.root().ok_or(anyhow!("no shards in state"))?.preload_with_depth_hint::<32>()?;
         }
-        Self::touch_config(config, with_params)
+        Self::touch_config(custom.config(), params)?;
         Ok(MerkleProof::create_by_usage_tree(&state_root, usage_tree)?)
     }
 
-    pub async fn get_config_params(&self, req: GetConfigParams) -> Result<ConfigInfo> {
+    pub async fn get_config_params(&self, mut req: GetConfigParams) -> Result<ConfigInfo> {
         if req.id.workchain != -1 {
             return Err(anyhow!("requested block is not in masterchain"))
         }
@@ -444,14 +462,19 @@ impl LiteServer {
             let key_seqno = block.read_info()?.prev_key_block_seqno();
             let key_id = self.search_mc_block_by_seqno(key_seqno).await?.ok_or(anyhow!("no such key block in masterchain state"))?;
             let key_root = self.load_block_by_tonlabs_id(&key_id).await?.ok_or(anyhow!("no such key block in db"))?;
-            let usage_tree = UsageTree::with_root(key_root.clone());
-            let key_block = Block::construct_from_cell(usage_tree.root_cell())?;
-            let config = key_block.read_extra()?.read_custom()?.ok_or(anyhow!("no custom data in key block"))?.config().ok_or(anyhow!("no config in key block"))?;
             Ok(ConfigInfo {
                 mode: (),
                 id: key_id.as_liteapi(),
                 state_proof: Vec::new(),
-                config_proof: todo!(),
+                config_proof: Self::make_block_proof(
+                    key_root,
+                    false,
+                    false,
+                    true,
+                    req.with_shard_hashes.is_some(),
+                    true,
+                    Some(req.param_list.as_slice()),
+                )?.write_to_bytes()?,
                 with_state_root: req.with_state_root,
                 with_libraries: req.with_libraries,
                 with_state_extra_root: req.with_state_extra_root,
@@ -466,15 +489,13 @@ impl LiteServer {
             })
         } else {
             let state_root = self.load_state(&req.id).await?.root_cell().clone();
-            let usage_tree = UsageTree::with_root(state_root.clone());
-            let state = ShardStateUnsplit::construct_from_cell(usage_tree.root_cell())?;
-            let config = state.read_custom()?.ok_or(anyhow!("no custom data in state"))?.config();
             Ok(ConfigInfo {
                 mode: (),
                 id: req.id,
-                state_proof: Self::make_block_proof(block_root, true, false, false)?.write_to_bytes()?,
+                state_proof: Self::make_block_proof(block_root, true, false, false, false, false, None)?.write_to_bytes()?,
                 config_proof: Self::make_state_proof(
-                    state_root, 
+                    state_root,
+                    Some(req.param_list.as_slice()),
                     req.with_accounts_root.is_some(), 
                     req.with_prev_blocks.is_some(), 
                     req.with_shard_hashes.is_some()
@@ -493,6 +514,69 @@ impl LiteServer {
             })
         }
         
+    }
+
+    pub async fn get_config_all(&self, req: GetConfigAll) -> Result<ConfigInfo> {
+        if req.id.workchain != -1 {
+            return Err(anyhow!("requested block is not in masterchain"))
+        }
+        let block_root = self.load_block_by_tonlabs_id(&req.id.as_tonlabs()?).await?.ok_or(anyhow!("no such block in db"))?;
+        let block = Block::construct_from_cell(block_root.clone())?;
+        if req.extract_from_key_block.is_some() {
+            let key_seqno = block.read_info()?.prev_key_block_seqno();
+            let key_id = self.search_mc_block_by_seqno(key_seqno).await?.ok_or(anyhow!("no such key block in masterchain state"))?;
+            let key_root = self.load_block_by_tonlabs_id(&key_id).await?.ok_or(anyhow!("no such key block in db"))?;
+            Ok(ConfigInfo {
+                mode: (),
+                id: key_id.as_liteapi(),
+                state_proof: Vec::new(),
+                config_proof: Self::make_block_proof(
+                    key_root,
+                    false,
+                    false,
+                    true,
+                    req.with_shard_hashes.is_some(),
+                    true,
+                    None,
+                )?.write_to_bytes()?,
+                with_state_root: req.with_state_root,
+                with_libraries: req.with_libraries,
+                with_state_extra_root: req.with_state_extra_root,
+                with_shard_hashes: req.with_shard_hashes,
+                with_accounts_root: req.with_accounts_root,
+                with_prev_blocks: req.with_prev_blocks,
+                extract_from_key_block: req.extract_from_key_block,
+                with_validator_set: req.with_validator_set,
+                with_special_smc: req.with_special_smc,
+                with_workchain_info: req.with_workchain_info,
+                with_capabilities: req.with_capabilities,
+            })
+        } else {
+            let state_root = self.load_state(&req.id).await?.root_cell().clone();
+            Ok(ConfigInfo {
+                mode: (),
+                id: req.id,
+                state_proof: Self::make_block_proof(block_root, true, false, false, false, false, None)?.write_to_bytes()?,
+                config_proof: Self::make_state_proof(
+                    state_root,
+                    None,
+                    req.with_accounts_root.is_some(), 
+                    req.with_prev_blocks.is_some(), 
+                    req.with_shard_hashes.is_some()
+                )?.write_to_bytes()?,
+                with_state_root: req.with_state_root,
+                with_libraries: req.with_libraries,
+                with_state_extra_root: req.with_state_extra_root,
+                with_shard_hashes: req.with_shard_hashes,
+                with_accounts_root: req.with_accounts_root,
+                with_prev_blocks: req.with_accounts_root,
+                extract_from_key_block: req.extract_from_key_block,
+                with_validator_set: req.with_validator_set,
+                with_special_smc: req.with_special_smc,
+                with_workchain_info: req.with_workchain_info,
+                with_capabilities: req.with_capabilities,
+            })
+        }
     }
 
     pub async fn wait_masterchain_seqno(&self, req: WaitMasterchainSeqno) -> Result<()> {
@@ -546,6 +630,9 @@ impl LiteServer {
             )),
             Request::GetConfigParams(req) => Ok(Response::ConfigInfo(
                 self.get_config_params(req).await?,
+            )),
+            Request::GetConfigAll(req) => Ok(Response::ConfigInfo(
+                self.get_config_all(req).await?,
             )),
             _ => Err(anyhow!("unimplemented method: {:?}", req.request)),
         }
