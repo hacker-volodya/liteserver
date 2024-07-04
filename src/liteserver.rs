@@ -3,17 +3,17 @@ use std::{sync::Arc, task::Poll, time::Duration};
 use anyhow::{anyhow, Result};
 use broxus_util::now;
 use futures_util::future::BoxFuture;
-use ton_block::{AccountIdPrefixFull, Block, ConfigParams, Deserializable, GetRepresentationHash, HashmapAugType, InRefValue, MerkleProof, MsgAddrStd, Serializable, ShardIdent, ShardStateUnsplit, Transaction, TraverseNextStep};
-use ton_indexer::{utils::ShardStateStuff, Engine, GlobalConfig};
+use ton_block::{AccountIdPrefixFull, Block, ConfigParams, CryptoSignaturePair, Deserializable, GetRepresentationHash, HashmapAugType, InRefValue, MerkleProof, MsgAddrStd, Serializable, ShardIdent, ShardStateUnsplit, Transaction, TraverseNextStep, SHARD_FULL};
+use ton_indexer::{utils::{BlockProofStuff, BlockProofStuffAug, ShardStateStuff}, Engine, GlobalConfig};
 use ton_liteapi::{
     layers::{UnwrapMessagesLayer, WrapErrorLayer},
     server::serve,
     tl::{
-        common::{AccountId, BlockIdExt, Int256, ZeroStateIdExt},
+        common::{AccountId, BlockIdExt, BlockLink, Int256, Signature, SignatureSet, ZeroStateIdExt},
         request::{
-            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetConfigAll, GetConfigParams, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, Request, WaitMasterchainSeqno, WrappedRequest
+            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetBlockProof, GetConfigAll, GetConfigParams, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, Request, WaitMasterchainSeqno, WrappedRequest
         },
-        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, MasterchainInfoExt, Response, TransactionId, TransactionList},
+        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, MasterchainInfoExt, PartialBlockProof, Response, TransactionId, TransactionList},
     },
     types::LiteError,
 };
@@ -119,6 +119,17 @@ impl LiteServer {
             }
         }
         Ok(None)
+    }
+
+    async fn load_block_proof(&self, block_id: &ton_block::BlockIdExt) -> Result<BlockProofStuff> {
+        let block_handle_storage = self.engine.storage().block_handle_storage();
+        let block_storage = self.engine.storage().block_storage();
+        if let Some(handle) = block_handle_storage.load_handle(&block_id)? {
+            if handle.meta().has_data() {
+                return Ok(block_storage.load_block_proof(&handle, false).await?);
+            }
+        }
+        Err(anyhow!("no such proof in db"))
     }
 
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
@@ -579,6 +590,137 @@ impl LiteServer {
         }
     }
 
+    fn construct_proof<T, F>(root: &Cell, mut visitor: F) -> Result<MerkleProof> where T: Deserializable, F: FnMut(&T) -> Result<()> {
+        let usage_tree = UsageTree::with_root(root.clone());
+        visitor(&T::construct_from_cell(usage_tree.root_cell())?)?;
+        Ok(MerkleProof::create_by_usage_tree(root, usage_tree)?)
+    }
+
+    fn construct_signatures(block_root: Cell, proof: &BlockProofStuff) -> Result<SignatureSet> {
+        let block = Block::construct_from_cell(block_root)?;
+        let info = block.read_info()?;
+        let mut signatures = SignatureSet {
+            validator_set_hash: info.gen_validator_list_hash_short(),
+            catchain_seqno: info.gen_catchain_seqno(),
+            signatures: Vec::new(),
+        };
+        proof.proof().clone().signatures.ok_or(anyhow!("no signatures"))?.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
+            let sign = CryptoSignaturePair::construct_from(slice)?;
+            signatures.signatures.push(Signature {
+                signature: sign.sign.signature().to_bytes().to_vec(),
+                node_id_short: Int256(*sign.node_id_short.as_array()),
+            });
+            Ok(true)
+        })?;
+        Ok(signatures)
+    }
+
+    pub async fn get_block_proof(&self, req: GetBlockProof) -> Result<PartialBlockProof> {
+        if req.known_block.workchain != -1 || req.known_block.shard != SHARD_FULL {
+            return Err(anyhow!("known_block must be in masterchain"))
+        }
+        let target_block = if let Some(target_block) = &req.target_block {
+            if target_block.workchain != -1 || target_block.shard != SHARD_FULL {
+                return Err(anyhow!("target_block must be in masterchain"))
+            }
+            target_block.as_tonlabs()?
+        } else if req.allow_weak_target.is_some() {
+            self.engine.load_last_applied_mc_block_id()?
+        } else {
+            self.engine.load_shards_client_mc_block_id()?
+        };
+        let base_block = if req.target_block.is_some() && req.base_block_from_request.is_some() || req.target_block.is_none() && req.allow_weak_target.is_none() {
+            if req.known_block.seqno > target_block.seq_no {
+                req.known_block.as_tonlabs()?
+            } else {
+                target_block.clone()
+            }
+        } else {
+            self.engine.load_last_applied_mc_block_id()?
+        };
+        let known_block = req.known_block.as_tonlabs()?;
+        if target_block.seq_no < known_block.seq_no {
+            let known_block_root = self.load_block_by_tonlabs_id(&known_block).await?.ok_or(anyhow!("no such known_block"))?;
+            let known_state = self.load_state(&req.known_block).await?;
+            let known_state_root = known_state.root_cell();
+            let mut to_key_block = false;
+            let proof = Self::construct_proof::<ShardStateUnsplit, _>(known_state_root, |state| {
+                let target_ref = state.read_custom()?.ok_or(anyhow!("no custom in mc state"))?.prev_blocks.get(&target_block.seq_no)?.ok_or(anyhow!("no such target block"))?;
+                to_key_block = target_ref.key;
+                Ok(())
+            })?;
+            Ok(PartialBlockProof {
+                complete: true,
+                from: req.known_block.clone(),
+                to: target_block.as_liteapi(),
+                steps: [
+                    BlockLink::BlockLinkBack {
+                        to_key_block,
+                        from: req.known_block,
+                        to: target_block.as_liteapi(),
+                        dest_proof: Vec::new(),
+                        proof: proof.write_to_bytes()?,
+                        state_proof: Self::make_block_proof(known_block_root, true, false, false, false, false, None)?.write_to_bytes()?,
+                    }
+                ].to_vec(),
+            })
+        } else if target_block.seq_no > known_block.seq_no {
+            let mut steps = Vec::new();
+            let base_state = self.load_state(&base_block.as_liteapi()).await?;
+            let extra = base_state.shard_state_extra()?;
+            let prev_blocks = &extra.prev_blocks;
+            let mut current = known_block;
+            let mut current_root = self.load_block_by_tonlabs_id(&current).await?.ok_or(anyhow!("no such known_block"))?;
+            loop {
+                if let Some(next_key_block) = prev_blocks.get_next_key_block(current.seq_no + 1)? {
+                    if next_key_block.seq_no <= target_block.seq_no {
+                        let next = next_key_block.clone().master_block_id().1;
+                        let next_root = self.load_block_by_tonlabs_id(&next).await?.ok_or(anyhow!("no such block in db"))?;
+                        let proof = self.load_block_proof(&next).await?;
+                        steps.push(BlockLink::BlockLinkForward {
+                            to_key_block: true,
+                            from: current.as_liteapi(),
+                            to: next.as_liteapi(),
+                            dest_proof: Self::make_block_proof(next_root.clone(), false, false, false, false, false, None)?.write_to_bytes()?,
+                            config_proof: Self::make_block_proof(current_root, false, false, true, false, true, Some(&[28, 34]))?.write_to_bytes()?,
+                            signatures: Self::construct_signatures(next_root.clone(), &proof)?,
+                        });
+                        if next_key_block.seq_no == target_block.seq_no {
+                            break
+                        }
+                        current = next;
+                        current_root = next_root;
+                        continue
+                    }
+                }
+                let next_root = self.load_block_by_tonlabs_id(&target_block).await?.ok_or(anyhow!("no such block in db"))?;
+                let proof = self.load_block_proof(&target_block).await?;
+                steps.push(BlockLink::BlockLinkForward {
+                    to_key_block: false,
+                    from: current.as_liteapi(),
+                    to: target_block.as_liteapi(),
+                    dest_proof: Self::make_block_proof(next_root.clone(), false, false, false, false, false, None)?.write_to_bytes()?,
+                    config_proof: Self::make_block_proof(current_root, false, false, true, false, true, Some(&[28, 34]))?.write_to_bytes()?,
+                    signatures: Self::construct_signatures(next_root, &proof)?,
+                });
+                break
+            }
+            Ok(PartialBlockProof {
+                complete: true,
+                from: req.known_block,
+                to: target_block.as_liteapi(),
+                steps,
+            })
+        } else {
+            Ok(PartialBlockProof {
+                complete: true,
+                from: req.known_block,
+                to: target_block.as_liteapi(),
+                steps: Vec::new(),
+            })
+        }
+    }
+
     pub async fn wait_masterchain_seqno(&self, req: WaitMasterchainSeqno) -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(req.timeout_ms as u64)) => Err(anyhow!("Timeout")),
@@ -633,6 +775,9 @@ impl LiteServer {
             )),
             Request::GetConfigAll(req) => Ok(Response::ConfigInfo(
                 self.get_config_all(req).await?,
+            )),
+            Request::GetBlockProof(req) => Ok(Response::PartialBlockProof(
+                self.get_block_proof(req).await?,
             )),
             _ => Err(anyhow!("unimplemented method: {:?}", req.request)),
         }

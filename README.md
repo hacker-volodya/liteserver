@@ -49,22 +49,22 @@ services:
 | ✅ | GetAccountState | no shard_proof for now
 | ✅ | GetTransactions
 | ✅ | LookupBlock
+| ✅ | GetConfigAll
+| ✅ | GetMasterchainInfoExt
+| ✅ | GetConfigParams
+| ✅ | GetBlockProof
 | | **high priority** (toncenter)
 | ⚠️ | SendMessage | TVM required
-| 🔜 | GetConfigParams
 | ⚠️ | RunSmcMethod | TVM required
-| ⚠️ | GetBlockProof | block proof research in progress
-| ⚠️ | LookupBlockWithProof | block proof research in progress
 | ⚠️ | GetShardBlockProof | block proof research in progress
 | | **medium priority**
-| 🔜 | GetConfigAll
-| 🔜 | GetMasterchainInfoExt
 | 🔜 | GetOneTransaction
 | 🔜 | GetShardInfo
 | 🔜 | GetAccountStatePrunned
 | 🔜 | ListBlockTransactionsExt
 | 🔜 | GetLibraries
 | 🔜 | GetLibrariesWithProof
+| ⚠️ | LookupBlockWithProof | block proof research in progress
 | | **low priority**
 | 🔜 | GetTime
 | 🔜 | GetVersion
