@@ -4,6 +4,7 @@ mod liteserver;
 mod web;
 mod utils;
 mod tracing_utils;
+mod tvm;
 
 use std::path::Path;
 use std::sync::Arc;

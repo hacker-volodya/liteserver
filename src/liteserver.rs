@@ -1,9 +1,10 @@
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use anyhow::{anyhow, Result};
+use base64::Engine as _;
 use broxus_util::now;
 use futures_util::future::BoxFuture;
-use ton_block::{AccountIdPrefixFull, Block, ConfigParams, CryptoSignaturePair, Deserializable, GetRepresentationHash, HashmapAugType, InRefValue, MerkleProof, MsgAddrStd, Serializable, ShardIdent, ShardStateUnsplit, Transaction, TraverseNextStep, SHARD_FULL};
+use ton_block::{AccountIdPrefixFull, Block, CommonMsgInfo, ConfigParams, CryptoSignaturePair, Deserializable, GetRepresentationHash, HashmapAugType, InRefValue, MerkleProof, Message, MsgAddrStd, Serializable, ShardIdent, ShardStateUnsplit, Transaction, TraverseNextStep, SHARD_FULL};
 use ton_indexer::{utils::{BlockProofStuff, BlockProofStuffAug, ShardStateStuff}, Engine, GlobalConfig};
 use ton_liteapi::{
     layers::{UnwrapMessagesLayer, WrapErrorLayer},
@@ -11,17 +12,17 @@ use ton_liteapi::{
     tl::{
         common::{AccountId, BlockIdExt, BlockLink, Int256, Signature, SignatureSet, ZeroStateIdExt},
         request::{
-            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetBlockProof, GetConfigAll, GetConfigParams, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, Request, WaitMasterchainSeqno, WrappedRequest
+            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetBlockProof, GetConfigAll, GetConfigParams, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, Request, RunSmcMethod, SendMessage, WaitMasterchainSeqno, WrappedRequest
         },
-        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, MasterchainInfoExt, PartialBlockProof, Response, TransactionId, TransactionList},
+        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, MasterchainInfoExt, PartialBlockProof, Response, RunMethodResult, SendMsgStatus, TransactionId, TransactionList},
     },
     types::LiteError,
 };
-use ton_types::{serialize_toc, BagOfCells, Cell, HashmapType, SliceData, UInt256, UsageTree};
+use ton_types::{deserialize_tree_of_cells, serialize_toc, BagOfCells, Cell, HashmapType, SliceData, UInt256, UsageTree};
 use tower::{make::Shared, Service, ServiceBuilder};
 use x25519_dalek::StaticSecret;
 
-use crate::utils::HashmapAugIterator;
+use crate::{tvm::EmulatorBuilder, utils::HashmapAugIterator};
 
 #[derive(Clone)]
 pub struct LiteServer {
@@ -721,6 +722,91 @@ impl LiteServer {
         }
     }
 
+    pub async fn run_smc_method(&self, req: RunSmcMethod) -> Result<RunMethodResult> {
+        let reference_id = if req.id.seqno != 0xffff_ffff {
+            req.id.as_tonlabs()?
+        } else {
+            self.engine.load_last_applied_mc_block_id()?
+        };
+        let shard_id = self.get_block_for_account(&req.account, &reference_id).await?;
+        let shard_block = self.load_block_by_tonlabs_id(&shard_id).await?.ok_or(anyhow!("no such block in db"))?;
+        let state_stuff = self.engine.load_state(&shard_id).await?;
+        let usage_tree_p2 = UsageTree::with_root(state_stuff.root_cell().clone());
+        let state = ShardStateUnsplit::construct_from_cell(usage_tree_p2.root_cell())?;
+        let account = state
+            .read_accounts()?
+            .account(&req.account.id())?
+            .ok_or(anyhow!("no such account"))?
+            .read_account()?;
+        let state_init = if let ton_block::AccountState::AccountActive { state_init } = account.state().ok_or(anyhow!("no state for account"))? {
+            state_init
+        } else {
+            return Err(anyhow!("account is not active"))
+        };
+        let code = serialize_toc(state_init.code().ok_or(anyhow!("no code in state"))?)?;
+        let data = serialize_toc(state_init.data().ok_or(anyhow!("no data in state"))?)?;
+        let mc_state = self.engine.load_state(&reference_id).await?;
+        let config = mc_state.shard_state_extra()?.config.write_to_bytes()?;
+        let balance = account.balance().and_then(|x| x.grams.as_u64()).unwrap_or(0);
+        let result = EmulatorBuilder::new(&code, &data)
+            .with_gas_limit(1000000)
+            .with_c7(&req.account, now(), balance, &[0u8; 32], &config)
+            .run_get_method(req.method_id as i32, &req.params);
+        let result = match result {
+            crate::tvm::TvmEmulatorRunGetMethodResult::Error(e) => return Err(anyhow!("tvm error: {:?}", e)),
+            crate::tvm::TvmEmulatorRunGetMethodResult::Success(r) => r,
+        };
+        Ok(RunMethodResult {
+            mode: (),
+            id: reference_id.as_liteapi(),
+            shardblk: shard_id.as_liteapi(),
+            shard_proof: None,
+            proof: None,
+            state_proof: None,
+            init_c7: None,
+            lib_extras: None,
+            exit_code: result.vm_exit_code,
+            result: Some(base64::engine::general_purpose::STANDARD.decode(result.stack)?),
+        })
+    }
+
+    pub async fn send_message(&self, req: SendMessage) -> Result<SendMsgStatus> {
+        let message = Message::construct_from_bytes(req.body.as_slice())?;
+        let message_info = if let CommonMsgInfo::ExtInMsgInfo(info) = message.header() {
+            info
+        } else {
+            return Err(anyhow!("message is not inbound external"))
+        };
+        let reference_id = self.engine.load_last_applied_mc_block_id()?;
+        let (wc, account_id) = message_info.dst.extract_std_address(true)?;
+        let acc_id = AccountId {
+            workchain: wc,
+            id: Int256(account_id.get_bytestring(0).try_into().unwrap()),
+        };
+        let shard_id = self.get_block_for_account(&acc_id, &reference_id).await?;
+        let state_stuff = self.engine.load_state(&shard_id).await?;
+        let acc = state_stuff.state().read_accounts()?.account(&account_id)?.ok_or(anyhow!("no such account"))?.read_account()?;
+        let state_init = if let ton_block::AccountState::AccountActive { state_init } = acc.state().ok_or(anyhow!("no state for account"))? {
+            state_init
+        } else {
+            return Err(anyhow!("account is not active"))
+        };
+        let code = serialize_toc(state_init.code().ok_or(anyhow!("no code in state"))?)?;
+        let data = serialize_toc(state_init.data().ok_or(anyhow!("no data in state"))?)?;
+        let mc_state = self.engine.load_state(&reference_id).await?;
+        let config = mc_state.shard_state_extra()?.config.write_to_bytes()?;
+        let balance = acc.balance().and_then(|x| x.grams.as_u64()).unwrap_or(0);
+        let result = EmulatorBuilder::new(&code, &data)
+            .with_gas_limit(1000000)
+            .with_c7(&acc_id, now(), balance, &[0u8; 32], &config)
+            .run_external(&req.body);
+        let result = match result {
+            crate::tvm::TvmEmulatorSendExternalMessageResult::Error(e) => return Err(anyhow!("tvm error: {:?}", e)),
+            crate::tvm::TvmEmulatorSendExternalMessageResult::Success(r) => r,
+        };
+        Ok(SendMsgStatus { status: 0 })
+    }
+
     pub async fn wait_masterchain_seqno(&self, req: WaitMasterchainSeqno) -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(req.timeout_ms as u64)) => Err(anyhow!("Timeout")),
@@ -778,6 +864,12 @@ impl LiteServer {
             )),
             Request::GetBlockProof(req) => Ok(Response::PartialBlockProof(
                 self.get_block_proof(req).await?,
+            )),
+            Request::RunSmcMethod(req) => Ok(Response::RunMethodResult(
+                self.run_smc_method(req).await?,
+            )),
+            Request::SendMessage(req) => Ok(Response::SendMsgStatus(
+                self.send_message(req).await?,
             )),
             _ => Err(anyhow!("unimplemented method: {:?}", req.request)),
         }

@@ -1,6 +1,6 @@
-FROM rust:1.77.2-buster AS builder
+FROM rust:1.77.2-bookworm AS builder
 WORKDIR /app
-RUN apt update && apt install -y libclang-dev clang
+RUN apt update && apt install -y cmake libclang-dev clang build-essential libsodium-dev libsecp256k1-dev lz4 liblz4-dev libssl-dev zlib1g-dev libreadline-dev libssl3
 COPY . .
 RUN --mount=type=cache,target=/var/cache/buildkit \
     CARGO_HOME=/var/cache/buildkit/cargo \
@@ -9,6 +9,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit \
     cp /var/cache/buildkit/target/release/ton-node /
 
 FROM debian:bookworm-slim AS runtime
+RUN apt update && apt install -y lz4 libssl3 libsodium-dev libsecp256k1-dev
 WORKDIR /app
 COPY --from=builder /ton-node /usr/local/bin
 VOLUME /data
