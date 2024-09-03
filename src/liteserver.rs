@@ -748,10 +748,16 @@ impl LiteServer {
         let mc_state = self.engine.load_state(&reference_id).await?;
         let config = mc_state.shard_state_extra()?.config.write_to_bytes()?;
         let balance = account.balance().and_then(|x| x.grams.as_u64()).unwrap_or(0);
+        let empty_stack = vec![181, 238, 156, 114, 65, 1, 1, 1, 0, 5, 0, 0, 6, 0, 0, 0, 208, 9, 95, 69];
+        let stack = if req.params.len() > 0 {
+            &req.params
+        } else {
+            &empty_stack
+        };
         let result = EmulatorBuilder::new(&code, &data)
             .with_gas_limit(1000000)
-            .with_c7(&req.account, now(), balance, &[0u8; 32], &config)
-            .run_get_method(req.method_id as i32, &req.params);
+            //.with_c7(&req.account, now(), balance, &[0u8; 32], &config)
+            .run_get_method(req.method_id as i32, stack);
         let result = match result {
             crate::tvm::TvmEmulatorRunGetMethodResult::Error(e) => return Err(anyhow!("tvm error: {:?}", e)),
             crate::tvm::TvmEmulatorRunGetMethodResult::Success(r) => r,
