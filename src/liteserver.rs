@@ -810,7 +810,11 @@ impl LiteServer {
             crate::tvm::TvmEmulatorSendExternalMessageResult::Error(e) => return Err(anyhow!("tvm error: {:?}", e)),
             crate::tvm::TvmEmulatorSendExternalMessageResult::Success(r) => r,
         };
-        Ok(SendMsgStatus { status: 0 })
+        if !result.accepted {
+            return Err(anyhow!("message was not accepted"))
+        }
+        self.engine.broadcast_external_message(-1, &req.body)?;
+        Ok(SendMsgStatus { status: 1 })
     }
 
     pub async fn wait_masterchain_seqno(&self, req: WaitMasterchainSeqno) -> Result<()> {
