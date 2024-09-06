@@ -746,7 +746,7 @@ impl LiteServer {
         let code = serialize_toc(state_init.code().ok_or(anyhow!("no code in state"))?)?;
         let data = serialize_toc(state_init.data().ok_or(anyhow!("no data in state"))?)?;
         let mc_state = self.engine.load_state(&reference_id).await?;
-        let config = mc_state.shard_state_extra()?.config.write_to_bytes()?;
+        let config = mc_state.shard_state_extra()?.config.config_params.write_to_bytes()?;
         let balance = account.balance().and_then(|x| x.grams.as_u64()).unwrap_or(0);
         let empty_stack = vec![181, 238, 156, 114, 65, 1, 1, 1, 0, 5, 0, 0, 6, 0, 0, 0, 208, 9, 95, 69];
         let stack = if req.params.len() > 0 {
@@ -756,7 +756,7 @@ impl LiteServer {
         };
         let result = EmulatorBuilder::new(&code, &data)
             .with_gas_limit(1000000)
-            //.with_c7(&req.account, now(), balance, &[0u8; 32], &config)
+            .with_c7(&req.account, now(), balance, &[0u8; 32], &config)
             .run_get_method(req.method_id as i32, stack);
         let result = match result {
             crate::tvm::TvmEmulatorRunGetMethodResult::Error(e) => return Err(anyhow!("tvm error: {:?}", e)),
