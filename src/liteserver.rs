@@ -32,7 +32,7 @@ pub struct LiteServer {
 
 impl LiteServer {
     pub async fn get_masterchain_info(&self) -> Result<MasterchainInfo> {
-        let last = self.engine.load_last_applied_mc_block_id()?;
+        let last = self.engine.load_shards_client_mc_block_id()?;
         let root_hash = self.engine.load_state(&last).await?.root_cell().repr_hash();
         Ok(MasterchainInfo {
             last: last.as_liteapi(),
@@ -49,7 +49,7 @@ impl LiteServer {
         if req.mode != 0 {
             return Err(anyhow!("Unsupported mode"));
         }
-        let last = self.engine.load_last_applied_mc_block_id()?;
+        let last = self.engine.load_shards_client_mc_block_id()?;
         let state = self.engine.load_state(&last).await?;
         let root_hash = state.root_cell().repr_hash();
         Ok(MasterchainInfoExt {
@@ -261,7 +261,7 @@ impl LiteServer {
         let reference_id = if req.id.seqno != 0xffff_ffff {
             req.id.as_tonlabs()?
         } else {
-            self.engine.load_last_applied_mc_block_id()?
+            self.engine.load_shards_client_mc_block_id()?
         };
         let shard_id = self.get_block_for_account(&req.account, &reference_id).await?;
         let shard_block = self.load_block_by_tonlabs_id(&shard_id).await?.ok_or(anyhow!("no such block in db"))?;
@@ -726,7 +726,7 @@ impl LiteServer {
         let reference_id = if req.id.seqno != 0xffff_ffff {
             req.id.as_tonlabs()?
         } else {
-            self.engine.load_last_applied_mc_block_id()?
+            self.engine.load_shards_client_mc_block_id()?
         };
         let shard_id = self.get_block_for_account(&req.account, &reference_id).await?;
         let shard_block = self.load_block_by_tonlabs_id(&shard_id).await?.ok_or(anyhow!("no such block in db"))?;
@@ -783,7 +783,7 @@ impl LiteServer {
         } else {
             return Err(anyhow!("message is not inbound external"))
         };
-        let reference_id = self.engine.load_last_applied_mc_block_id()?;
+        let reference_id = self.engine.load_shards_client_mc_block_id()?;
         let (wc, account_id) = message_info.dst.extract_std_address(true)?;
         let acc_id = AccountId {
             workchain: wc,
