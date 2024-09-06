@@ -53,9 +53,9 @@ services:
 | ✅ | GetMasterchainInfoExt
 | ✅ | GetConfigParams
 | ✅ | GetBlockProof
+| ✅ | SendMessage | no library support
+| ✅ | RunSmcMethod | no proofs, no library support
 | | **high priority** (toncenter)
-| ⚠️ | SendMessage | TVM required
-| ⚠️ | RunSmcMethod | TVM required
 | ⚠️ | GetShardBlockProof | block proof research in progress
 | | **medium priority**
 | 🔜 | GetOneTransaction
