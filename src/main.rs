@@ -83,6 +83,8 @@ async fn run(app: App) -> Result<()> {
         tracing::info!("-c option is not set, using default node configuration");
         Config::default()
     };
+    // disable shard state cache, it leaks memory and should not be used
+    config.indexer.shard_state_cache_options = None;
     tracing::info!(?config, "Node configuration is done");
 
     tracing::info!("RocksDB size is {} GB", fs_extra::dir::get_size(&config.indexer.rocks_db_path).unwrap_or(0) >> 30);
