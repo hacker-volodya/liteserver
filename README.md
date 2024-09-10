@@ -53,8 +53,8 @@ services:
 | ✅ | GetMasterchainInfoExt
 | ✅ | GetConfigParams
 | ✅ | GetBlockProof
-| ✅ | SendMessage | no library support
-| ✅ | RunSmcMethod | no proofs, no library support
+| ✅ | SendMessage
+| ✅ | RunSmcMethod | no proofs
 | | **high priority** (toncenter)
 | ⚠️ | GetShardBlockProof | block proof research in progress
 | | **medium priority**

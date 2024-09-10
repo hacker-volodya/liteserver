@@ -745,6 +745,7 @@ impl LiteServer {
         };
         let code = serialize_toc(state_init.code().ok_or(anyhow!("no code in state"))?)?;
         let data = serialize_toc(state_init.data().ok_or(anyhow!("no data in state"))?)?;
+        let libs = state_stuff.state().libraries().write_to_bytes()?;
         let mc_state = self.engine.load_state(&reference_id).await?;
         let config = mc_state.shard_state_extra()?.config.config_params.write_to_bytes()?;
         let balance = account.balance().and_then(|x| x.grams.as_u64()).unwrap_or(0);
@@ -757,6 +758,7 @@ impl LiteServer {
         let result = EmulatorBuilder::new(&code, &data)
             .with_gas_limit(1000000)
             .with_c7(&req.account, now(), balance, &[0u8; 32], &config)
+            .with_libs(&libs)
             .run_get_method(req.method_id as i32, stack);
         let result = match result {
             crate::tvm::TvmEmulatorRunGetMethodResult::Error(e) => return Err(anyhow!("tvm error: {:?}", e)),
@@ -799,12 +801,14 @@ impl LiteServer {
         };
         let code = serialize_toc(state_init.code().ok_or(anyhow!("no code in state"))?)?;
         let data = serialize_toc(state_init.data().ok_or(anyhow!("no data in state"))?)?;
+        let libs = state_stuff.state().libraries().write_to_bytes()?;
         let mc_state = self.engine.load_state(&reference_id).await?;
         let config = mc_state.shard_state_extra()?.config.config_params.write_to_bytes()?;
         let balance = acc.balance().and_then(|x| x.grams.as_u64()).unwrap_or(0);
         let result = EmulatorBuilder::new(&code, &data)
             .with_gas_limit(1000000)
             .with_c7(&acc_id, now(), balance, &[0u8; 32], &config)
+            .with_libs(&libs)
             .run_external(&req.body);
         let result = match result {
             crate::tvm::TvmEmulatorSendExternalMessageResult::Error(e) => return Err(anyhow!("tvm error: {:?}", e)),
