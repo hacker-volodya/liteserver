@@ -10,11 +10,11 @@ use ton_liteapi::{
     layers::{UnwrapMessagesLayer, WrapErrorLayer},
     server::serve,
     tl::{
-        common::{AccountId, BlockIdExt, BlockLink, Int256, Signature, SignatureSet, ZeroStateIdExt},
+        common::{AccountId, BlockIdExt, BlockLink, Int256, LibraryEntry, Signature, SignatureSet, ZeroStateIdExt},
         request::{
-            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetBlockProof, GetConfigAll, GetConfigParams, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, Request, RunSmcMethod, SendMessage, WaitMasterchainSeqno, WrappedRequest
+            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetBlockProof, GetConfigAll, GetConfigParams, GetLibraries, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, Request, RunSmcMethod, SendMessage, WaitMasterchainSeqno, WrappedRequest
         },
-        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, MasterchainInfo, MasterchainInfoExt, PartialBlockProof, Response, RunMethodResult, SendMsgStatus, TransactionId, TransactionList},
+        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, LibraryResult, MasterchainInfo, MasterchainInfoExt, PartialBlockProof, Response, RunMethodResult, SendMsgStatus, TransactionId, TransactionList},
     },
     types::LiteError,
 };
@@ -850,6 +850,16 @@ impl LiteServer {
         Ok(SendMsgStatus { status: 1 })
     }
 
+    pub async fn get_libraries(&self, req: GetLibraries) -> Result<LibraryResult> {
+        let mut result = Vec::new();
+        let state = self.load_state_by_tonlabs_id(&self.engine.load_last_applied_mc_block_id()?).await?;
+        for hash in req.library_list {
+            let library = state.state().libraries().get(&UInt256::from_slice(&hash.0))?.ok_or(anyhow!("no such library: {:?}", hash))?;
+            result.push(LibraryEntry { hash, data: library.lib().write_to_bytes()? });
+        }
+        Ok(LibraryResult { result })
+    }
+
     pub async fn wait_masterchain_seqno(&self, req: WaitMasterchainSeqno) -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(req.timeout_ms as u64)) => Err(anyhow!("Timeout")),
@@ -913,6 +923,9 @@ impl LiteServer {
             )),
             Request::SendMessage(req) => Ok(Response::SendMsgStatus(
                 self.send_message(req).await?,
+            )),
+            Request::GetLibraries(req) => Ok(Response::LibraryResult(
+                self.get_libraries(req).await?,
             )),
             _ => Err(anyhow!("unimplemented method: {:?}", req.request)),
         }
