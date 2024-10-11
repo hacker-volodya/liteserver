@@ -126,7 +126,7 @@ impl LiteServer {
         let block_handle_storage = self.engine.storage().block_handle_storage();
         let block_storage = self.engine.storage().block_storage();
         if let Some(handle) = block_handle_storage.load_handle(&block_id)? {
-            if handle.meta().has_data() {
+            if handle.meta().has_proof() {
                 return Ok(block_storage.load_block_proof(&handle, false).await?);
             }
         }
@@ -701,45 +701,50 @@ impl LiteServer {
             let extra = base_state.shard_state_extra()?;
             let prev_blocks = &extra.prev_blocks;
             let mut current = known_block;
-            let mut current_root = self.load_block_by_tonlabs_id(&current).await?.ok_or(anyhow!("no such known_block"))?;
-            loop {
+            let mut current_proof = self.load_block_proof(&current).await?;
+            let mut complete = false;
+            let mut to = current.clone();
+            while steps.len() < 16 {
+                // there is key blocks between current block and target block, make link current -> key block
                 if let Some(next_key_block) = prev_blocks.get_next_key_block(current.seq_no + 1)? {
                     if next_key_block.seq_no <= target_block.seq_no {
                         let next = next_key_block.clone().master_block_id().1;
-                        let next_root = self.load_block_by_tonlabs_id(&next).await?.ok_or(anyhow!("no such block in db"))?;
                         let proof = self.load_block_proof(&next).await?;
                         steps.push(BlockLink::BlockLinkForward {
                             to_key_block: true,
                             from: current.as_liteapi(),
                             to: next.as_liteapi(),
-                            dest_proof: Self::make_block_proof(next_root.clone(), false, false, false, false, false, None)?.write_to_bytes()?,
-                            config_proof: Self::make_block_proof(current_root, false, false, true, false, true, Some(&[28, 34]))?.write_to_bytes()?,
-                            signatures: Self::construct_signatures(next_root.clone(), &proof)?,
+                            dest_proof: MerkleProof::construct_from_cell(proof.proof().root.clone())?.write_to_bytes()?,
+                            config_proof: MerkleProof::construct_from_cell(current_proof.proof().root.clone())?.write_to_bytes()?,
+                            signatures: Self::construct_signatures(proof.virtualize_block_root()?, &proof)?,
                         });
+                        to = next.clone();
                         if next_key_block.seq_no == target_block.seq_no {
                             break
                         }
                         current = next;
-                        current_root = next_root;
+                        current_proof = proof;
                         continue
                     }
                 }
-                let next_root = self.load_block_by_tonlabs_id(&target_block).await?.ok_or(anyhow!("no such block in db"))?;
+                // last link between last key block and target block
                 let proof = self.load_block_proof(&target_block).await?;
                 steps.push(BlockLink::BlockLinkForward {
                     to_key_block: false,
                     from: current.as_liteapi(),
                     to: target_block.as_liteapi(),
-                    dest_proof: Self::make_block_proof(next_root.clone(), false, false, false, false, false, None)?.write_to_bytes()?,
-                    config_proof: Self::make_block_proof(current_root, false, false, true, false, true, Some(&[28, 34]))?.write_to_bytes()?,
-                    signatures: Self::construct_signatures(next_root, &proof)?,
+                    dest_proof: MerkleProof::construct_from_cell(proof.proof().root.clone())?.write_to_bytes()?,
+                    config_proof: MerkleProof::construct_from_cell(current_proof.proof().root.clone())?.write_to_bytes()?,
+                    signatures: Self::construct_signatures(proof.virtualize_block_root()?, &proof)?,
                 });
+                to = target_block;
+                complete = true;
                 break
             }
             Ok(PartialBlockProof {
-                complete: true,
+                complete,
                 from: req.known_block,
-                to: target_block.as_liteapi(),
+                to: to.as_liteapi(),
                 steps,
             })
         } else {
