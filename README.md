@@ -46,7 +46,7 @@ services:
 | ✅ | GetAllShardsInfo
 | ✅ | ListBlockTransactions
 | ✅ | GetBlock
-| ✅ | GetAccountState | no shard_proof for now
+| ✅ | GetAccountState
 | ✅ | GetTransactions
 | ✅ | LookupBlock
 | ✅ | GetConfigAll
@@ -55,6 +55,7 @@ services:
 | ✅ | GetBlockProof
 | ✅ | SendMessage
 | ✅ | RunSmcMethod | no proofs
+| ✅ | GetLibraries
 | | **high priority** (toncenter)
 | ⚠️ | GetShardBlockProof | block proof research in progress
 | | **medium priority**
@@ -62,7 +63,6 @@ services:
 | 🔜 | GetShardInfo
 | 🔜 | GetAccountStatePrunned
 | 🔜 | ListBlockTransactionsExt
-| 🔜 | GetLibraries
 | 🔜 | GetLibrariesWithProof
 | ⚠️ | LookupBlockWithProof | block proof research in progress
 | | **low priority**
