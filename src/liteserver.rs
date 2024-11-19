@@ -367,7 +367,6 @@ impl LiteServer {
                 file_hash: Int256(*UInt256::calc_file_hash(&block_raw).as_array()),
             };
             if let Some(account_block) = block.read_extra()?.read_account_blocks()?.get(&account.raw_id())? {
-                block_ids.push(block_id);
                 println!("we want lt {lt}");
                 let complete = account_block.transactions().iterate_ext(true, None, |_, InRefValue(tx)| {
                     if tx.lt != lt {
@@ -375,6 +374,7 @@ impl LiteServer {
                     }
                     println!("we got lt {} (wanted {}), next lt we want is {}", tx.lt, lt, tx.prev_trans_lt);
                     lt = tx.prev_trans_lt;
+                    block_ids.push(block_id.clone());
                     transactions.push(tx);
                     Ok(if let Some(count) = count { transactions.len() < count } else { true })
                 })?;
