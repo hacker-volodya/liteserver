@@ -18,7 +18,8 @@ futures-util = "0.3"
 axum = "0.7.2"
 ton_block = { git = "https://github.com/broxus/ton-labs-block.git", features = ["ton"] }
 prometheus = { version = "0.13.3", features = ["process"] }
-ton_liteapi = { git = "https://github.com/tonstack/lite-client", branch = "async" }
+ton_liteapi = "0.2.0"
+adnl = "2.0.0"
 ton_types = { git = "https://github.com/broxus/ton-labs-types.git" }
 tower = { version = "0.4.13" }
 hex = "0.4"

@@ -25,12 +25,13 @@ checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 
 [[package]]
 name = "adnl"
-version = "1.0.0"
-source = "git+https://github.com/tonstack/adnl-rs?branch=server#5295e900bfa705ba42e1390761464cd997d349d4"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b3cb50ffb09675285804083fc6283ad84a0857db567280959903b84c9ea3aac"
 dependencies = [
  "aes",
  "ctr",
- "curve25519-dalek",
+ "everscale-crypto",
  "futures",
  "hex",
  "log",
@@ -41,7 +42,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
- "x25519-dalek",
 ]
 
 [[package]]
@@ -2807,6 +2807,7 @@ dependencies = [
 name = "ton-node"
 version = "0.1.0"
 dependencies = [
+ "adnl",
  "anyhow",
  "argh",
  "async-trait",
@@ -2862,8 +2863,9 @@ dependencies = [
 
 [[package]]
 name = "ton_liteapi"
-version = "0.1.0"
-source = "git+https://github.com/tonstack/lite-client?branch=async#b1242daf9cf16e8fe00aa90543c3cdbb156b21bc"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8041476f7c8cfd56fb9f60b25b0a01e8ef6ffb8822ba2387f4a62152f79591"
 dependencies = [
  "adnl",
  "derivative",

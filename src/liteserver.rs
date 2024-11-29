@@ -1,5 +1,6 @@
 use std::{sync::Arc, task::Poll, time::Duration};
 
+use adnl::crypto::{KeyPair, SecretKey};
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
 use broxus_util::now;
@@ -226,7 +227,8 @@ impl LiteServer {
                 mode: (),
                 account: Some(Int256(tx.account_addr.to_owned().get_next_bytes(32)?.try_into().unwrap())),
                 lt: Some(tx.lt),
-                hash: Some(Int256(*tx.hash()?.as_array()))
+                hash: Some(Int256(*tx.hash()?.as_array())),
+                metadata: None,
             });
             let should_continue = ids.len() < req.count as usize;
             Ok(should_continue)
@@ -965,7 +967,9 @@ pub fn run(engine: Arc<Engine>, config: GlobalConfig) {
                 .unwrap()
                 .try_into()
                 .unwrap();
-        let key = StaticSecret::from(key);
+        let key = KeyPair::from(&SecretKey::from_bytes(key));
+
+        tracing::info!("Public key is: {}", base64::encode(key.public_key.to_bytes()));
 
         // TODO: configurable layers, rate limiting by ip/adnl
         let service = ServiceBuilder::new()
