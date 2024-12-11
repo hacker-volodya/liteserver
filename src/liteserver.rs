@@ -13,9 +13,9 @@ use ton_liteapi::{
     tl::{
         common::{AccountId, BlockIdExt, BlockLink, Int256, LibraryEntry, Signature, SignatureSet, ZeroStateIdExt},
         request::{
-            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetBlockProof, GetConfigAll, GetConfigParams, GetLibraries, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, Request, RunSmcMethod, SendMessage, WaitMasterchainSeqno, WrappedRequest
+            GetAccountState, GetAllShardsInfo, GetBlock, GetBlockHeader, GetBlockProof, GetConfigAll, GetConfigParams, GetLibraries, GetMasterchainInfoExt, GetTransactions, ListBlockTransactions, LookupBlock, LookupBlockWithProof, Request, RunSmcMethod, SendMessage, WaitMasterchainSeqno, WrappedRequest
         },
-        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, LibraryResult, MasterchainInfo, MasterchainInfoExt, PartialBlockProof, Response, RunMethodResult, SendMsgStatus, TransactionId, TransactionList},
+        response::{AccountState, AllShardsInfo, BlockData, BlockHeader, BlockTransactions, ConfigInfo, LibraryResult, LookupBlockResult, MasterchainInfo, MasterchainInfoExt, PartialBlockProof, Response, RunMethodResult, SendMsgStatus, TransactionId, TransactionList},
     },
     types::LiteError,
 };
@@ -184,27 +184,13 @@ impl LiteServer {
 
     pub async fn get_all_shards_info(&self, request: GetAllShardsInfo) -> Result<AllShardsInfo> {
         let block_root = self.load_block(&request.id).await?.ok_or(anyhow!("no such block in db"))?;
-
-        // proof1: from block to shardstate update
-        let proof1 = Self::make_block_proof(block_root, true, false, false, false, false, None)?;
-
-        // proof2: from shardstate root to shard_hashes
-        let state_stuff = self.load_state(&request.id).await?;
-        let usage_tree = UsageTree::with_root(state_stuff.root_cell().clone());
-        let state = ShardStateUnsplit::construct_from_cell(usage_tree.root_cell())?;
-        let extra = state
-            .read_custom()?
-            .ok_or_else(|| anyhow!("block must contain McStateExtra"))?;
-        let shards = extra.shards();
-        let proof2 = MerkleProof::create_by_usage_tree(state_stuff.root_cell(), usage_tree)?;
-
-        let mut proof = Vec::new();
-        BagOfCells::with_roots(&[proof1.serialize()?, proof2.serialize()?])
-            .write_to(&mut proof, false)?;
+        let block = Block::construct_from_cell(block_root.clone())?;
+        let custom = block.read_extra()?.read_custom()?.ok_or(anyhow!("no custom in mc block"))?;
+        let shards = custom.shards();
 
         Ok(AllShardsInfo {
             id: request.id,
-            proof,
+            proof: Self::make_block_proof(block_root, false, false, true, true, false, None)?.write_to_bytes()?,
             data: shards.write_to_bytes()?,
         })
     }
@@ -369,12 +355,10 @@ impl LiteServer {
                 file_hash: Int256(*UInt256::calc_file_hash(&block_raw).as_array()),
             };
             if let Some(account_block) = block.read_extra()?.read_account_blocks()?.get(&account.raw_id())? {
-                println!("we want lt {lt}");
                 let complete = account_block.transactions().iterate_ext(true, None, |_, InRefValue(tx)| {
                     if tx.lt != lt {
                         return Ok(true)
                     }
-                    println!("we got lt {} (wanted {}), next lt we want is {}", tx.lt, lt, tx.prev_trans_lt);
                     lt = tx.prev_trans_lt;
                     block_ids.push(block_id.clone());
                     transactions.push(tx);
@@ -867,6 +851,48 @@ impl LiteServer {
         Ok(LibraryResult { result })
     }
 
+    pub async fn lookup_block_with_proof(&self, req: LookupBlockWithProof) -> Result<LookupBlockResult> {
+        let shard = ShardIdent::with_tagged_prefix(req.id.workchain, req.id.shard)?;
+        let block = if let Some(utime) = req.utime {
+            self.engine.storage().block_storage().search_block_by_utime(&shard, utime)?
+        } else if let Some(lt) = req.lt {
+            self.engine.storage().block_storage().search_block_by_lt(&shard, lt)?
+        } else if req.seqno.is_some() {
+            self.engine.storage().block_storage().search_block_by_seqno(&shard, req.id.seqno)?
+        } else {
+            return Err(anyhow!("exactly one of utime, lt or seqno must be specified"))
+        }.ok_or(anyhow!("no such block in db"))?;
+        
+        let block_root = ton_types::deserialize_tree_of_cells(&mut block.as_ref())?;
+        let header = Self::make_block_proof(
+            block_root.clone(),
+            req.with_state_update.is_some(),
+            req.with_value_flow.is_some(),
+            req.with_extra.is_some(),
+            false,
+            false,
+            None,
+        )?;
+        let seqno = Block::construct_from_cell(block_root.clone())?.read_info()?.seq_no();
+        let id = BlockIdExt {
+            workchain: shard.workchain_id(),
+            shard: shard.shard_prefix_with_tag(),
+            seqno,
+            root_hash: Int256(*block_root.repr_hash().as_array()),
+            file_hash: Int256(*UInt256::calc_file_hash(&block).as_array()),
+        };
+        Ok(LookupBlockResult {
+            id: id.clone(),
+            mode: (),
+            mc_block_id: id,
+            client_mc_state_proof: Vec::new(),
+            mc_block_proof: Vec::new(),
+            shard_links: Vec::new(),
+            header: header.write_to_bytes()?,
+            prev_header: Vec::new(),
+        })
+    }
+
     pub async fn wait_masterchain_seqno(&self, req: WaitMasterchainSeqno) -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(req.timeout_ms as u64)) => Err(anyhow!("Timeout")),
@@ -933,6 +959,9 @@ impl LiteServer {
             )),
             Request::GetLibraries(req) => Ok(Response::LibraryResult(
                 self.get_libraries(req).await?,
+            )),
+            Request::LookupBlockWithProof(req) => Ok(Response::LookupBlockResult(
+                self.lookup_block_with_proof(req).await?,
             )),
             _ => Err(anyhow!("unimplemented method: {:?}", req.request)),
         }
